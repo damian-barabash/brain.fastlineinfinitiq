@@ -303,18 +303,12 @@ label.f > span {
   overflow: hidden;
   white-space: nowrap;
 }
-.sb-logo .mark {
+.sb-logo .mark-img {
   width: 34px;
   height: 34px;
   flex-shrink: 0;
-  background: var(--acid-fill);
-  color: var(--acid-ink);
-  display: grid;
-  place-items: center;
-  font-family: 'Archivo', sans-serif;
-  font-stretch: 125%;
-  font-weight: 900;
-  font-size: 15px;
+  display: block;
+  border: 1px solid var(--line);
 }
 .sb-logo .word {
   font-family: 'Archivo', sans-serif;

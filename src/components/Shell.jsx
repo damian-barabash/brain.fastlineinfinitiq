@@ -69,7 +69,7 @@ export default function Shell() {
       <aside className={`sb ${open ? '' : 'closed'}`}>
         <div className="sb-top">
           <div className="sb-logo">
-            <span className="mark">B</span>
+            <img className="mark-img" src="/favicon-192.png" alt="InfinitiQ" />
             {open && (
               <span className="word">
                 Brain<em>.</em>
