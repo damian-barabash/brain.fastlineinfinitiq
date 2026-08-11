@@ -223,18 +223,32 @@ function providerConfig(ai: AiCfg) {
 async function callProvider(ai: AiCfg, messages: unknown[], stream: boolean) {
   const { baseUrl, apiKey, model } = providerConfig(ai);
   if (!baseUrl || !apiKey) return null;
-  return await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      stream,
-      think: false,
-      temperature: ai.temperature ?? 0.6,
-      max_tokens: ai.max_tokens ?? 700,
-      messages,
-    }),
-  });
+  const doFetch = () =>
+    fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream,
+        think: false,
+        temperature: ai.temperature ?? 0.6,
+        max_tokens: ai.max_tokens ?? 700,
+        messages,
+      }),
+    });
+  // sieciowe czknięcia (tls handshake eof na Funnelu itp.) — jeden retry zamiast crasha 500
+  try {
+    return await doFetch();
+  } catch (e) {
+    console.error("provider network error, retrying once:", String(e).slice(0, 200));
+    await new Promise((r) => setTimeout(r, 600));
+    try {
+      return await doFetch();
+    } catch (e2) {
+      console.error("provider network error (retry failed):", String(e2).slice(0, 200));
+      return null;
+    }
+  }
 }
 
 // SSE-przelot: upstream (OpenAI) → {d:"…"} + finał {done:true, ...extra z onFull}
@@ -484,7 +498,7 @@ Deno.serve(async (req) => {
 
   const t0 = Date.now();
   const upstream = await callProvider(ctx.ai as AiCfg, [{ role: "system", content: sys }, ...history, { role: "user", content: message }], wantStream);
-  if (!upstream) return J({ error: "ai not configured" }, 500);
+  if (!upstream) return J({ error: "provider unreachable" }, 502);
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => "");
     console.error("provider error", upstream.status, errText.slice(0, 300));
