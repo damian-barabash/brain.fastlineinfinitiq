@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#0D0D0D" />
+    <title>Brain — Fastline InfinitiQ</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@125,600..900&family=Schibsted+Grotesk:ital,wght@0,400..700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap&subset=latin-ext"
+      rel="stylesheet"
+    />
+    <script>
+      // motyw przed pierwszym paintem (bez błysku)
+      (function () {
+        try {
+          var t = localStorage.getItem('brain_theme');
+          if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+          else document.documentElement.dataset.theme = 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
