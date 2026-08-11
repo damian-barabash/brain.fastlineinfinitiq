@@ -12,6 +12,7 @@ import {
   IcFacebook,
   IcChat,
   IcKey,
+  IcGlobe,
 } from '../components/Icons.jsx'
 
 const TONES = ['Profesjonalny', 'Przyjazny', 'Ekspercki', 'Energiczny', 'Spokojny i rzeczowy']
@@ -46,7 +47,7 @@ export default function Advisor() {
         </button>
       </div>
       {tab === 'archetype' && <Archetype projId={proj.id} />}
-      {tab === 'test' && <TestChat channels={channels} />}
+      {tab === 'test' && <TestChat projId={proj.id} channels={channels} refreshChannels={refreshChannels} />}
       {tab === 'integrations' && <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />}
     </>
   )
@@ -170,13 +171,58 @@ function Archetype({ projId }) {
 }
 
 // ── Test rozmowy ────────────────────────────────────────────────────────────
-function TestChat({ channels }) {
-  const key = channels?.find((c) => c.type === 'widget')?.public_key
-  const [msgs, setMsgs] = useState([])
+function TestChat({ projId, channels, refreshChannels }) {
+  const key = channels?.find((c) => c.type === 'widget' && !c.config?.demo)?.public_key
+  const demoCh = channels?.find((c) => c.config?.demo)
+  // rozmowa testowa przeżywa nawigację po panelu (sessionStorage per projekt)
+  const storeKey = `brain_testchat:${projId}`
+  const saved = (() => {
+    try {
+      return JSON.parse(sessionStorage.getItem(storeKey) || 'null')
+    } catch {
+      return null
+    }
+  })()
+  const [msgs, setMsgs] = useState(saved?.msgs || [])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [convId, setConvId] = useState(null)
+  const [convId, setConvId] = useState(saved?.convId || null)
+  const [linkOk, setLinkOk] = useState(false)
+  const [rotating, setRotating] = useState(false)
   const boxRef = useRef(null)
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(storeKey, JSON.stringify({ msgs, convId }))
+    } catch {
+      /* quota */
+    }
+  }, [msgs, convId, storeKey])
+  // link demo wisi na OSOBNYM kanale — rotacja nie psuje widgetu wklejonego na strony klientów;
+  // origin bieżący, więc działa i na localhost, i na domenie produkcyjnej
+  const demoUrl = demoCh ? `${window.location.origin}/demo?key=${demoCh.public_key}` : ''
+
+  useEffect(() => {
+    // kanał demo tworzy się sam przy pierwszym wejściu w zakładkę
+    if (channels && !demoCh) {
+      api('channels.create', { project_id: projId, type: 'widget', name: 'Link demo', config: { demo: true } })
+        .then(() => refreshChannels())
+        .catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels])
+
+  async function rotateLink() {
+    if (!demoCh || rotating) return
+    if (!confirm('Stary link demo natychmiast przestanie działać. Wygenerować nowy?')) return
+    setRotating(true)
+    try {
+      await api('channels.rotateKey', { id: demoCh.id })
+      await refreshChannels()
+    } finally {
+      setRotating(false)
+    }
+  }
 
   useEffect(() => {
     boxRef.current?.scrollTo({ top: boxRef.current.scrollHeight })
@@ -224,15 +270,45 @@ function TestChat({ channels }) {
       <div className="row" style={{ padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
         <span className="dot" />
         <span className="mono" style={{ color: 'var(--text)' }}>Podgląd na żywo — rozmowa testowa</span>
-        <button
-          className="btn sm right"
-          onClick={() => {
-            setMsgs([])
-            setConvId(null)
-          }}
-        >
-          <IcRefresh /> Nowa rozmowa
-        </button>
+        <span className="right row" style={{ gap: 6 }}>
+          <button
+            className="btn sm"
+            disabled={!demoCh}
+            onClick={() => {
+              navigator.clipboard.writeText(demoUrl)
+              setLinkOk(true)
+              setTimeout(() => setLinkOk(false), 1600)
+            }}
+            title="Publiczny link demo — wyślij klientowi, otworzy sam czat bez panelu"
+          >
+            {linkOk ? <IcCheck /> : <IcCopy />} {linkOk ? 'Skopiowano' : 'Kopiuj link demo'}
+          </button>
+          <a className="btn sm" href={demoUrl || '#'} target="_blank" rel="noreferrer" aria-disabled={!demoCh}>
+            <IcGlobe /> Otwórz
+          </a>
+          <button
+            className="btn sm danger"
+            disabled={!demoCh || rotating}
+            onClick={rotateLink}
+            title="Unieważnij stary link i wygeneruj nowy"
+          >
+            <IcKey /> {rotating ? 'Generowanie…' : 'Nowy link'}
+          </button>
+          <button
+            className="btn sm"
+            onClick={() => {
+              setMsgs([])
+              setConvId(null)
+              try {
+                sessionStorage.removeItem(storeKey)
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            <IcRefresh /> Nowa rozmowa
+          </button>
+        </span>
       </div>
       <div className="chat-msgs" ref={boxRef}>
         {!msgs.length && <p className="muted">Napisz wiadomość, aby sprawdzić jak odpowiada doradca z aktualną bazą wiedzy i archetypem.</p>}
@@ -284,7 +360,7 @@ function CodeBox({ code }) {
 }
 
 function Integrations({ projId, channels, refreshChannels }) {
-  const widget = channels?.find((c) => c.type === 'widget')
+  const widget = channels?.find((c) => c.type === 'widget' && !c.config?.demo)
   const [color, setColor] = useState(widget?.config?.color || '#B8FF00')
   const [position, setPosition] = useState(widget?.config?.position || 'left')
   const [waPhone, setWaPhone] = useState(widget?.config?.wa_phone || '')

@@ -466,6 +466,15 @@ Deno.serve(async (req) => {
         await db.from("brain_channels").update(patch).eq("id", body.id as string);
         return J({ ok: true });
       }
+      case "channels.rotateKey": {
+        // nowy public_key — stary link/embed natychmiast przestaje działać
+        const { data: ch } = await db.from("brain_channels").select("project_id").eq("id", body.id as string).maybeSingle();
+        if (!ch) return J({ error: "not found" }, 404);
+        await assertProject(user, ch.project_id);
+        const key = newToken();
+        await db.from("brain_channels").update({ public_key: key }).eq("id", body.id as string);
+        return J({ public_key: key });
+      }
       case "channels.delete": {
         const { data: ch } = await db.from("brain_channels").select("project_id").eq("id", body.id as string).maybeSingle();
         if (!ch) return J({ error: "not found" }, 404);
