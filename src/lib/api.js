@@ -138,15 +138,15 @@ export async function api(action, payload = {}) {
   return data
 }
 
-// Czat SSE: onDelta(tekst), onDone({conversation_id,...}); zwraca AbortController.
-export function chatStream({ key, message, conversationId, visitorId }, { onDelta, onDone, onError }) {
+// Czat SSE (dowolne body: wiadomość albo action=rewrite): zwraca AbortController.
+export function chatStreamRaw(body, { onDelta, onDone, onError }) {
   const ctrl = new AbortController()
   ;(async () => {
     try {
       const r = await fetch(`${FN_BASE}/brain-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, message, conversation_id: conversationId, visitor_id: visitorId }),
+        body: JSON.stringify(body),
         signal: ctrl.signal,
       })
       if (!r.ok) {
@@ -180,6 +180,22 @@ export function chatStream({ key, message, conversationId, visitorId }, { onDelt
     }
   })()
   return ctrl
+}
+
+export function chatStream({ key, message, conversationId, visitorId }, handlers) {
+  return chatStreamRaw({ key, message, conversation_id: conversationId, visitor_id: visitorId }, handlers)
+}
+
+// akcje JSON czatu: rate / feedback.decide / end
+export async function chatAction(key, payload) {
+  const r = await fetch(`${FN_BASE}/brain-chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, ...payload }),
+  })
+  const data = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+  return data
 }
 
 export async function chatHello(key) {

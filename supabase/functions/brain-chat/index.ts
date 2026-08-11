@@ -2,6 +2,8 @@
 // Autoryzacja: public_key kanału (brain_channels). SSE stream (domyślnie) lub JSON (stream:false).
 // Provider elastyczny: OpenAI-compatible chat/completions — base_url+model z brain_settings.ai_provider,
 // klucz z sekretu (key_secret, domyślnie BRAIN_AI_KEY). Barabash AI dziś, DeepSeek jutro — bez zmian kodu.
+// Trening: akcje rate / rewrite / feedback.decide — zatwierdzone poprawki trafiają NA STAŁE do promptu
+// jako "STAŁE WSKAZÓWKI TRENERA" (tabela brain_feedback, status approved).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 const db = createClient(
@@ -21,6 +23,8 @@ const J = (data: unknown, status = 200) =>
 const HISTORY_LIMIT = 12;
 const FIRM_KB_CAP = 2000; // znaków wiedzy ogólnej w prompt'cie (krótszy prompt = szybszy pierwszy token)
 const PRODUCT_FULL = 2; // ile produktów w pełnej wersji
+const LESSON_LIMIT = 15; // ile zatwierdzonych wskazówek trenera wchodzi do promptu
+const LESSON_CHARS = 1800;
 
 type Advisor = {
   persona?: string;
@@ -32,6 +36,7 @@ type Advisor = {
   escalation?: string;
   language?: string;
 };
+type Lesson = { note: string; corrected: string };
 
 function relevanceScore(text: string, name: string): number {
   const t = text.toLowerCase();
@@ -54,6 +59,7 @@ function buildSystemPrompt(
     sales_phone: string;
     kb: string;
   }[],
+  lessons: Lesson[],
   userText: string,
 ): string {
   const scored = products
@@ -88,6 +94,19 @@ function buildSystemPrompt(
     }
   }
   if (rest.length) lines.push(`Pozostałe produkty (znasz tylko nazwy): ${rest.join(", ")}.`);
+  if (lessons.length) {
+    let block = "";
+    for (const l of lessons) {
+      const entry = `- ${l.note}${l.corrected ? ` (wzór dobrej odpowiedzi: ${l.corrected.slice(0, 220)})` : ""}\n`;
+      if (block.length + entry.length > LESSON_CHARS) break;
+      block += entry;
+    }
+    if (block) {
+      lines.push(
+        `\n=== STAŁE WSKAZÓWKI TRENERA (zatwierdzone poprawki — stosuj je BEZWZGLĘDNIE w każdej odpowiedzi) ===\n${block.trim()}`,
+      );
+    }
+  }
   lines.push(
     `\nGdy klient chce kupić — podaj link do zakupu produktu. Gdy pytanie wykracza poza wiedzę, klient chce negocjować, złożyć reklamację albo prosi o człowieka — przekaż kontakt do opiekuna sprzedaży właściwego produktu i dodaj na końcu odpowiedzi znacznik [PRZEKAZANIE].`,
   );
@@ -100,7 +119,7 @@ function buildSystemPrompt(
 }
 
 // cache kontekstu per klucz — izolat edge żyje między żądaniami, kolejne wiadomości
-// w rozmowie nie płacą za 2 rundy do bazy (TTL krótki, żeby edycje KB wchodziły szybko)
+// w rozmowie nie płacą za rundy do bazy (TTL krótki, żeby edycje KB wchodziły szybko)
 const CTX_TTL_MS = 20_000;
 const ctxCache = new Map<string, { t: number; v: Awaited<ReturnType<typeof loadContextFresh>> }>();
 
@@ -120,11 +139,18 @@ async function loadContextFresh(publicKey: string) {
     .maybeSingle();
   if (!ch || !ch.enabled) return null;
   const project = ch.brain_projects as unknown as { id: string; name: string };
-  const [{ data: adv }, { data: products }, { data: items }, { data: settings }] = await Promise.all([
+  const [{ data: adv }, { data: products }, { data: items }, { data: settings }, { data: fb }] = await Promise.all([
     db.from("brain_advisor").select("config").eq("project_id", ch.project_id).maybeSingle(),
     db.from("brain_products").select("id, name, description, buy_url, sales_name, sales_phone").eq("project_id", ch.project_id).order("sort"),
     db.from("brain_kb_items").select("product_id, content").eq("project_id", ch.project_id).order("sort"),
     db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle(),
+    db
+      .from("brain_feedback")
+      .select("note, corrected")
+      .eq("project_id", ch.project_id)
+      .eq("status", "approved")
+      .order("created_at", { ascending: false })
+      .limit(LESSON_LIMIT),
   ]);
   const firmText = (items ?? [])
     .filter((i) => !i.product_id && i.content)
@@ -139,7 +165,15 @@ async function loadContextFresh(publicKey: string) {
       .join("\n")
       .slice(0, 700),
   }));
-  return { channel: ch, project, advisor: (adv?.config ?? {}) as Advisor, firmText, products: prods, ai: settings?.value ?? {} };
+  return {
+    channel: ch,
+    project,
+    advisor: (adv?.config ?? {}) as Advisor,
+    firmText,
+    products: prods,
+    lessons: (fb ?? []) as Lesson[],
+    ai: settings?.value ?? {},
+  };
 }
 
 function stripMd(text: string): string {
@@ -173,6 +207,109 @@ async function ensureConversation(
     .select("id")
     .single();
   return data!.id;
+}
+
+type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string };
+
+function providerConfig(ai: AiCfg) {
+  let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").replace(/\/+$/, "");
+  if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
+  if (!baseUrl.endsWith("/v1")) baseUrl += "/v1";
+  const apiKey = Deno.env.get(ai.key_secret || "BRAIN_AI_KEY") || "";
+  const model = ai.model || "qwen3.5:9b";
+  return { baseUrl, apiKey, model };
+}
+
+async function callProvider(ai: AiCfg, messages: unknown[], stream: boolean) {
+  const { baseUrl, apiKey, model } = providerConfig(ai);
+  if (!baseUrl || !apiKey) return null;
+  return await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      stream,
+      think: false,
+      temperature: ai.temperature ?? 0.6,
+      max_tokens: ai.max_tokens ?? 700,
+      messages,
+    }),
+  });
+}
+
+// SSE-przelot: upstream (OpenAI) → {d:"…"} + finał {done:true, ...extra z onFull}
+function sseFromUpstream(
+  upstream: Response,
+  first: Record<string, unknown>,
+  onFull: (full: string) => Promise<Record<string, unknown>>,
+) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let full = "";
+  let buf = "";
+  let mdCarry = "";
+  const stream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(first)}\n\n`));
+      const reader = upstream.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split("\n\n");
+          buf = parts.pop() ?? "";
+          for (const part of parts) {
+            const line = part.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            const payload = line.slice(5).trim();
+            if (payload === "[DONE]") continue;
+            try {
+              const jd = JSON.parse(payload);
+              const piece = jd?.choices?.[0]?.delta?.content ?? "";
+              if (piece) {
+                full += piece;
+                // znacznik przekazania nie wycieka do klienta; markdown czyścimy w locie
+                let visible = mdCarry + piece.replaceAll("[PRZEKAZANIE]", "");
+                mdCarry = "";
+                if (visible.endsWith("*") && !visible.endsWith("**")) {
+                  mdCarry = "*";
+                  visible = visible.slice(0, -1);
+                }
+                visible = visible.replaceAll("**", "").replaceAll("__", "");
+                if (visible) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ d: visible })}\n\n`));
+              }
+            } catch {
+              /* niepełny chunk — ignoruj */
+            }
+          }
+        }
+        const extra = await onFull(full);
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, ...extra })}\n\n`));
+      } catch (e) {
+        console.error("stream error", e);
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "stream" })}\n\n`));
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: { ...CORS, "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+  });
+}
+
+// wiadomość musi należeć do projektu tego klucza
+async function loadProjectMessage(projectId: string, messageId: number) {
+  const { data } = await db
+    .from("brain_messages")
+    .select("id, role, content, conversation_id, brain_conversations!inner(project_id)")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (!data) return null;
+  const conv = data.brain_conversations as unknown as { project_id: string };
+  if (conv.project_id !== projectId) return null;
+  return data as unknown as { id: number; role: string; content: string; conversation_id: string };
 }
 
 Deno.serve(async (req) => {
@@ -211,6 +348,106 @@ Deno.serve(async (req) => {
     return J({ ok: true });
   }
 
+  // ── trening: kciuk w górę/dół ─────────────────────────────────────────────
+  if (body.action === "rate") {
+    const msgId = Number(body.message_id);
+    const rating = body.rating === "up" ? "up" : "down";
+    const msg = await loadProjectMessage(ctx.project.id, msgId);
+    if (!msg || msg.role !== "assistant") return J({ error: "not found" }, 404);
+    const { data } = await db
+      .from("brain_feedback")
+      .insert({
+        project_id: ctx.project.id,
+        conversation_id: msg.conversation_id,
+        message_id: msgId,
+        rating,
+        original: msg.content,
+        note: String(body.note || "").slice(0, 1000),
+      })
+      .select("id")
+      .single();
+    return J({ feedback_id: data!.id });
+  }
+
+  // ── trening: przepisz odpowiedź wg uwagi trenera ──────────────────────────
+  if (body.action === "rewrite") {
+    const msgId = Number(body.message_id);
+    const note = String(body.note || "").slice(0, 1000).trim();
+    if (!note) return J({ error: "empty note" }, 400);
+    const msg = await loadProjectMessage(ctx.project.id, msgId);
+    if (!msg || msg.role !== "assistant") return J({ error: "not found" }, 404);
+    // pytanie użytkownika poprzedzające tę odpowiedź
+    const { data: prevUser } = await db
+      .from("brain_messages")
+      .select("content")
+      .eq("conversation_id", msg.conversation_id)
+      .eq("role", "user")
+      .lt("id", msgId)
+      .order("id", { ascending: false })
+      .limit(1);
+    const question = prevUser?.[0]?.content ?? "";
+
+    const sys = buildSystemPrompt(
+      ctx.project.name,
+      ctx.advisor,
+      ctx.firmText,
+      ctx.products,
+      ctx.lessons,
+      question + " " + note,
+    );
+    const messages = [
+      { role: "system", content: sys },
+      { role: "user", content: question },
+      { role: "assistant", content: msg.content },
+      {
+        role: "user",
+        content: `TRENER (uwaga wewnętrzna, nie klient): poprzednia odpowiedź jest do poprawy. Uwaga trenera: "${note}". Napisz tę odpowiedź od nowa dla klienta, stosując uwagę. Sam tekst odpowiedzi, bez komentarzy i bez odnoszenia się do uwagi.`,
+      },
+    ];
+    const upstream = await callProvider(ctx.ai as AiCfg, messages, true);
+    if (!upstream || !upstream.ok) return J({ error: "provider" }, 502);
+
+    return sseFromUpstream(upstream, { cid: msg.conversation_id }, async (full) => {
+      const clean = stripMd(full.replaceAll("[PRZEKAZANIE]", "")).trim();
+      await db.from("brain_messages").update({ content: clean, chars: clean.length }).eq("id", msgId);
+      const { data: fb } = await db
+        .from("brain_feedback")
+        .insert({
+          project_id: ctx.project.id,
+          conversation_id: msg.conversation_id,
+          message_id: msgId,
+          rating: "down",
+          note,
+          original: msg.content,
+          corrected: clean,
+          status: "pending",
+        })
+        .select("id")
+        .single();
+      return { feedback_id: fb!.id, message_id: msgId };
+    });
+  }
+
+  // ── trening: zatwierdź (zapamiętaj NA ZAWSZE) albo odrzuć poprawkę ───────
+  if (body.action === "feedback.decide") {
+    const fid = String(body.feedback_id || "");
+    const okDecision = !!body.ok;
+    const { data: fb } = await db
+      .from("brain_feedback")
+      .select("id, project_id")
+      .eq("id", fid)
+      .eq("project_id", ctx.project.id)
+      .maybeSingle();
+    if (!fb) return J({ error: "not found" }, 404);
+    await db
+      .from("brain_feedback")
+      .update({ status: okDecision ? "approved" : "rejected" })
+      .eq("id", fid);
+    ctxCache.delete(key); // nowa lekcja ma działać od NASTĘPNEJ wiadomości, bez czekania na TTL
+    return J({ ok: true, status: okDecision ? "approved" : "rejected" });
+  }
+
+  // ── zwykła wiadomość ──────────────────────────────────────────────────────
   const message = String(body.message || "").slice(0, 4000).trim();
   if (!message) return J({ error: "empty" }, 400);
   const visitorId = String(body.visitor_id || "anon").slice(0, 80);
@@ -241,30 +478,13 @@ Deno.serve(async (req) => {
     ctx.advisor,
     ctx.firmText,
     ctx.products,
+    ctx.lessons,
     message + " " + history.slice(-4).map((m) => m.content).join(" "),
   );
 
-  const ai = ctx.ai as { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string };
-  let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").replace(/\/+$/, "");
-  if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
-  if (!baseUrl.endsWith("/v1")) baseUrl += "/v1";
-  const apiKey = Deno.env.get(ai.key_secret || "BRAIN_AI_KEY") || "";
-  const model = ai.model || "qwen3.5:9b";
-  if (!baseUrl || !apiKey) return J({ error: "ai not configured" }, 500);
-
   const t0 = Date.now();
-  const upstream = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      stream: wantStream,
-      think: false,
-      temperature: ai.temperature ?? 0.6,
-      max_tokens: ai.max_tokens ?? 700,
-      messages: [{ role: "system", content: sys }, ...history, { role: "user", content: message }],
-    }),
-  });
+  const upstream = await callProvider(ctx.ai as AiCfg, [{ role: "system", content: sys }, ...history, { role: "user", content: message }], wantStream);
+  if (!upstream) return J({ error: "ai not configured" }, 500);
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => "");
     console.error("provider error", upstream.status, errText.slice(0, 300));
@@ -275,13 +495,17 @@ Deno.serve(async (req) => {
     const redirected = reply.includes("[PRZEKAZANIE]");
     const clean = stripMd(reply.replaceAll("[PRZEKAZANIE]", "")).trim();
     const latency = Date.now() - t0;
-    await db.from("brain_messages").insert({
-      conversation_id: cid,
-      role: "assistant",
-      content: clean,
-      chars: clean.length,
-      latency_ms: latency,
-    });
+    const { data: inserted } = await db
+      .from("brain_messages")
+      .insert({
+        conversation_id: cid,
+        role: "assistant",
+        content: clean,
+        chars: clean.length,
+        latency_ms: latency,
+      })
+      .select("id")
+      .single();
     const patch: Record<string, unknown> = { last_at: new Date().toISOString() };
     if (redirected) patch.status = "redirected";
     await db.from("brain_conversations").update(patch).eq("id", cid);
@@ -293,76 +517,18 @@ Deno.serve(async (req) => {
         data: { channel: ctx.channel.type },
       });
     }
-    return { clean, redirected, latency };
+    return { clean, redirected, latency, messageId: inserted?.id ?? null };
   };
 
   if (!wantStream) {
     const data = await upstream.json();
     const raw = data?.choices?.[0]?.message?.content ?? "";
-    const { clean, redirected } = await finish(raw);
-    return J({ conversation_id: cid, reply: clean, redirected });
+    const { clean, redirected, messageId } = await finish(raw);
+    return J({ conversation_id: cid, reply: clean, redirected, message_id: messageId });
   }
 
-  // przelot SSE: upstream (OpenAI format) → prosty format {d:"…"} + finał {done,conversation_id}
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  let full = "";
-  let buf = "";
-  let mdCarry = ""; // gwiazdka wisząca na granicy chunków
-  const stream = new ReadableStream({
-    async start(controller) {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ cid })}\n\n`));
-      const reader = upstream.body!.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split("\n\n");
-          buf = parts.pop() ?? "";
-          for (const part of parts) {
-            const line = part.split("\n").find((l) => l.startsWith("data:"));
-            if (!line) continue;
-            const payload = line.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-              const jd = JSON.parse(payload);
-              const piece = jd?.choices?.[0]?.delta?.content ?? "";
-              if (piece) {
-                full += piece;
-                // znacznik przekazania nie wycieka do klienta; markdown czyścimy w locie
-                let visible = mdCarry + piece.replaceAll("[PRZEKAZANIE]", "");
-                mdCarry = "";
-                if (visible.endsWith("*") && !visible.endsWith("**")) {
-                  mdCarry = "*";
-                  visible = visible.slice(0, -1);
-                }
-                visible = visible.replaceAll("**", "").replaceAll("__", "");
-                if (visible) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ d: visible })}\n\n`));
-              }
-            } catch {
-              /* niepełny chunk — ignoruj */
-            }
-          }
-        }
-        const { redirected, latency } = await finish(full);
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ done: true, conversation_id: cid, redirected, latency })}\n\n`),
-        );
-      } catch (e) {
-        console.error("stream error", e);
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "stream" })}\n\n`));
-      } finally {
-        controller.close();
-      }
-    },
-  });
-  return new Response(stream, {
-    headers: {
-      ...CORS,
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
+  return sseFromUpstream(upstream, { cid }, async (full) => {
+    const { redirected, latency, messageId } = await finish(full);
+    return { conversation_id: cid, redirected, latency, message_id: messageId };
   });
 });

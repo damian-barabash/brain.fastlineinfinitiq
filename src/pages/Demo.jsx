@@ -2,6 +2,7 @@
 // Samodzielne okno rozmowy z doradcą projektu, bez logowania i bez panelu.
 import { useEffect, useRef, useState } from 'react'
 import { chatStream, chatHello } from '../lib/api.js'
+import ChatFeedback from '../components/ChatFeedback.jsx'
 import { IcSend, IcRefresh } from '../components/Icons.jsx'
 
 function visitorId() {
@@ -63,6 +64,11 @@ export default function Demo() {
         onDone: (jd) => {
           setConvId(jd.conversation_id)
           setBusy(false)
+          setMsgs((m) => {
+            const nm = [...m]
+            nm[nm.length - 1] = { ...nm[nm.length - 1], dbId: jd.message_id }
+            return nm
+          })
         },
         onError: () => {
           setBusy(false)
@@ -121,15 +127,30 @@ export default function Demo() {
           {hello && !hello.error && <div className="msg ai">{hello.greeting}</div>}
           {hello?.error && <div className="msg ai">Ten link demo jest nieaktywny.</div>}
           {msgs.map((m, i) => (
-            <div key={i} className={`msg ${m.role === 'user' ? 'user' : 'ai'}`}>
-              {m.content ? (
-                linkify(m.content)
-              ) : (
-                <span className="typing" style={{ padding: 0 }}>
-                  <i />
-                  <i />
-                  <i />
-                </span>
+            <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+              <div className={`msg ${m.role === 'user' ? 'user' : 'ai'}`}>
+                {m.content ? (
+                  linkify(m.content)
+                ) : (
+                  <span className="typing" style={{ padding: 0 }}>
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                )}
+              </div>
+              {m.role === 'ai' && m.dbId && (
+                <ChatFeedback
+                  chatKey={key}
+                  messageId={m.dbId}
+                  onReplace={(c) =>
+                    setMsgs((mm) => {
+                      const nm = [...mm]
+                      nm[i] = { ...nm[i], content: c }
+                      return nm
+                    })
+                  }
+                />
               )}
             </div>
           ))}

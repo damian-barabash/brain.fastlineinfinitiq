@@ -30,6 +30,7 @@ export default function WidgetFrame() {
   const q = new URLSearchParams(window.location.search)
   const key = q.get('key') || ''
   const color = /^#[0-9a-fA-F]{6}$/.test(q.get('color') || '') ? q.get('color') : '#B8FF00'
+  const bg = /^#[0-9a-fA-F]{6}$/.test(q.get('bg') || '') ? q.get('bg') : null
   const [hello, setHello] = useState(null)
   const [msgs, setMsgs] = useState([])
   const [input, setInput] = useState('')
@@ -38,7 +39,9 @@ export default function WidgetFrame() {
   const boxRef = useRef(null)
 
   useEffect(() => {
-    document.documentElement.dataset.theme = q.get('theme') === 'light' ? 'light' : 'dark'
+    // tło okna z konfiguracji widgetu — motyw (kolory tekstu/bąbelków) dobiera się po jasności tła
+    const light = bg ? parseInt(bg.slice(1), 16) > 0x7fffff : q.get('theme') === 'light'
+    document.documentElement.dataset.theme = light ? 'light' : 'dark'
     if (key) chatHello(key).then(setHello).catch(() => setHello({ error: true }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
@@ -83,7 +86,7 @@ export default function WidgetFrame() {
 
   if (!key) return <div style={{ padding: 20 }} className="muted">Brak klucza widgetu.</div>
   return (
-    <div className="chat" style={{ height: '100vh', background: 'var(--bg)' }}>
+    <div className="chat" style={{ height: '100vh', background: bg || 'var(--bg)' }}>
       <div
         className="row"
         style={{ padding: '13px 16px', background: color, color: ink, flexShrink: 0 }}

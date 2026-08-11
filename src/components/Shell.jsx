@@ -81,7 +81,7 @@ export default function Shell() {
               <button onClick={() => nav('/')} title="Zmień workspace / projekt">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>WS</span> <b>{ws?.name}</b>
               </button>
-              <button onClick={() => nav('/')} title="Zmień projekt">
+              <button onClick={() => nav('/', { state: { openWs: ws } })} title="Zmień projekt">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>PR</span> <b>{proj?.name}</b>
               </button>
             </div>

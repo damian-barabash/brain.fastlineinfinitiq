@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, session, chatStream, FN_BASE, PANEL_ORIGIN } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
+import ChatFeedback from '../components/ChatFeedback.jsx'
 import {
   IcCheck,
   IcSend,
@@ -249,7 +250,7 @@ function TestChat({ projId, channels, refreshChannels }) {
           setBusy(false)
           setMsgs((m) => {
             const nm = [...m]
-            nm[nm.length - 1] = { ...nm[nm.length - 1], t: ((performance.now() - t0) / 1000).toFixed(1) }
+            nm[nm.length - 1] = { ...nm[nm.length - 1], t: ((performance.now() - t0) / 1000).toFixed(1), dbId: jd.message_id }
             return nm
           })
         },
@@ -313,12 +314,27 @@ function TestChat({ projId, channels, refreshChannels }) {
       <div className="chat-msgs" ref={boxRef}>
         {!msgs.length && <p className="muted">Napisz wiadomość, aby sprawdzić jak odpowiada doradca z aktualną bazą wiedzy i archetypem.</p>}
         {msgs.map((m, i) => (
-          <div key={i} className={`msg ${m.role === 'user' ? 'user' : 'ai'}`}>
-            {m.content || <span className="typing" style={{ padding: 0 }}><i /><i /><i /></span>}
-            {m.t && (
-              <div className="mono" style={{ marginTop: 6, fontSize: 9.5, opacity: 0.7 }}>
-                {m.t} s
-              </div>
+          <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+            <div className={`msg ${m.role === 'user' ? 'user' : 'ai'}`}>
+              {m.content || <span className="typing" style={{ padding: 0 }}><i /><i /><i /></span>}
+              {m.t && (
+                <div className="mono" style={{ marginTop: 6, fontSize: 9.5, opacity: 0.7 }}>
+                  {m.t} s
+                </div>
+              )}
+            </div>
+            {m.role === 'ai' && m.dbId && key && (
+              <ChatFeedback
+                chatKey={key}
+                messageId={m.dbId}
+                onReplace={(c) =>
+                  setMsgs((mm) => {
+                    const nm = [...mm]
+                    nm[i] = { ...nm[i], content: c }
+                    return nm
+                  })
+                }
+              />
             )}
           </div>
         ))}
@@ -362,6 +378,8 @@ function CodeBox({ code }) {
 function Integrations({ projId, channels, refreshChannels }) {
   const widget = channels?.find((c) => c.type === 'widget' && !c.config?.demo)
   const [color, setColor] = useState(widget?.config?.color || '#B8FF00')
+  const [iconColor, setIconColor] = useState(widget?.config?.icon_color || '')
+  const [winBg, setWinBg] = useState(widget?.config?.win_bg || '#0D0D0D')
   const [position, setPosition] = useState(widget?.config?.position || 'left')
   const [waPhone, setWaPhone] = useState(widget?.config?.wa_phone || '')
   const [savedW, setSavedW] = useState(false)
@@ -372,13 +390,18 @@ function Integrations({ projId, channels, refreshChannels }) {
     // świeży config z sieci wchodzi do pól dopóki użytkownik nic nie zmienił
     if (widget && !dirtyW.current) {
       setColor(widget.config?.color || '#B8FF00')
+      setIconColor(widget.config?.icon_color || '')
+      setWinBg(widget.config?.win_bg || '#0D0D0D')
       setPosition(widget.config?.position || 'left')
       setWaPhone(widget.config?.wa_phone || '')
     }
   }, [widget?.id, widgetCfgKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function saveWidget() {
-    await api('channels.update', { id: widget.id, config: { ...widget.config, color, position, wa_phone: waPhone } })
+    await api('channels.update', {
+      id: widget.id,
+      config: { ...widget.config, color, position, wa_phone: waPhone, icon_color: iconColor, win_bg: winBg },
+    })
     dirtyW.current = false
     await refreshChannels()
     setSavedW(true)
@@ -387,7 +410,7 @@ function Integrations({ projId, channels, refreshChannels }) {
 
   if (!channels) return <p className="muted">Ładowanie…</p>
   const embed = widget
-    ? `<script src="${PANEL_ORIGIN}/widget.js" data-key="${widget.public_key}" data-color="${color}" data-position="${position}" async></script>`
+    ? `<script src="${PANEL_ORIGIN}/widget.js" data-key="${widget.public_key}" data-color="${color}"${iconColor ? ` data-icon="${iconColor}"` : ''} data-bg="${winBg}" data-position="${position}" async></script>`
     : ''
   const embedWa = widget
     ? `<script src="${PANEL_ORIGIN}/widget.js" data-mode="whatsapp" data-phone="${waPhone || '48XXXXXXXXX'}" data-color="#25D366" data-position="${position}" async></script>`
@@ -410,10 +433,33 @@ function Integrations({ projId, channels, refreshChannels }) {
           </p>
           <div className="row" style={{ marginBottom: 14 }}>
             <label className="f" style={{ margin: 0 }}>
-              <span className="mono">Kolor</span>
+              <span className="mono">Kolor przycisku</span>
               <div className="row">
                 <input type="color" value={/^#([0-9a-f]{6})$/i.test(color) ? color : '#B8FF00'} onChange={(e) => { dirtyW.current = true; setColor(e.target.value) }} style={{ width: 46, height: 38, padding: 3 }} />
-                <input value={color} onChange={(e) => { dirtyW.current = true; setColor(e.target.value) }} style={{ width: 110 }} />
+                <input value={color} onChange={(e) => { dirtyW.current = true; setColor(e.target.value) }} style={{ width: 100 }} />
+              </div>
+            </label>
+            <label className="f" style={{ margin: 0 }}>
+              <span className="mono">Kolor ikony</span>
+              <div className="row">
+                <input type="color" value={/^#([0-9a-f]{6})$/i.test(iconColor) ? iconColor : '#0d0d0d'} onChange={(e) => { dirtyW.current = true; setIconColor(e.target.value) }} style={{ width: 46, height: 38, padding: 3 }} />
+                <button type="button" className={`btn sm ${!iconColor ? 'primary' : ''}`} onClick={() => { dirtyW.current = true; setIconColor('') }} title="Automatyczny kontrast do koloru przycisku">
+                  Auto
+                </button>
+              </div>
+            </label>
+            <label className="f" style={{ margin: 0 }}>
+              <span className="mono">Tło okna czatu</span>
+              <div className="row">
+                <input type="color" value={/^#([0-9a-f]{6})$/i.test(winBg) ? winBg : '#0D0D0D'} onChange={(e) => { dirtyW.current = true; setWinBg(e.target.value) }} style={{ width: 46, height: 38, padding: 3 }} />
+                <div className="chips">
+                  <button type="button" className={winBg.toLowerCase() === '#0d0d0d' ? 'on' : ''} onClick={() => { dirtyW.current = true; setWinBg('#0D0D0D') }}>
+                    Ciemne
+                  </button>
+                  <button type="button" className={winBg.toLowerCase() === '#f5f5f0' ? 'on' : ''} onClick={() => { dirtyW.current = true; setWinBg('#F5F5F0') }}>
+                    Jasne
+                  </button>
+                </div>
               </div>
             </label>
             <label className="f" style={{ margin: 0 }}>

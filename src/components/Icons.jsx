@@ -247,6 +247,18 @@ export const IcEye = (p) => (
     <circle cx="12" cy="12" r="2.8" />
   </I>
 )
+export const IcThumbUp = (p) => (
+  <I {...p}>
+    <path d="M7 10.5L11 3c1.5 0 2.5 1 2.5 2.5V9H19l1.5 2-1.8 8H7z" />
+    <path d="M7 10.5V19H3.5v-8.5H7z" />
+  </I>
+)
+export const IcThumbDown = (p) => (
+  <I {...p}>
+    <path d="M17 13.5L13 21c-1.5 0-2.5-1-2.5-2.5V15H5l-1.5-2 1.8-8H17z" />
+    <path d="M17 13.5V5h3.5v8.5H17z" />
+  </I>
+)
 export const IcKey = (p) => (
   <I {...p}>
     <circle cx="8" cy="14" r="4" />

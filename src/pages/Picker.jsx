@@ -1,12 +1,13 @@
 // Wybór workspace → projekt (z tworzeniem na każdym kroku).
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { api, session } from '../lib/api.js'
 import { useCached, invalidate } from '../lib/useCached.js'
 import { IcFolder, IcBox, IcPlus, IcLogout, IcArrowR } from '../components/Icons.jsx'
 
 export default function Picker() {
   const nav = useNavigate()
+  const loc = useLocation()
   const user = session.user
   const [ws, setWs] = useState(null) // wybrany workspace
   const [wsData, refreshWs] = useCached('ws.list', {})
@@ -16,6 +17,12 @@ export default function Picker() {
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
+    // wejście z przycisku PR w sidebarze — od razu wybór projektu w bieżącym workspace
+    const openWs = loc.state?.openWs
+    if (openWs && !ws) {
+      pick(openWs)
+      return
+    }
     // klient z jednym workspace — od razu do projektów
     if (user?.role !== 'admin' && workspaces?.length === 1 && !ws) pick(workspaces[0])
     // eslint-disable-next-line react-hooks/exhaustive-deps
