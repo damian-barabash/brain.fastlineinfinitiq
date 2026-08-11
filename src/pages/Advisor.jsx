@@ -409,11 +409,12 @@ function Integrations({ projId, channels, refreshChannels }) {
   }
 
   if (!channels) return <p className="muted">Ładowanie…</p>
+  const WIDGET_V = 2 // podbijać przy każdej zmianie public/widget.js
   const embed = widget
-    ? `<script src="${PANEL_ORIGIN}/widget.js" data-key="${widget.public_key}" data-color="${color}"${iconColor ? ` data-icon="${iconColor}"` : ''} data-bg="${winBg}" data-position="${position}" async></script>`
+    ? `<script src="${PANEL_ORIGIN}/widget.js?v=${WIDGET_V}" data-key="${widget.public_key}" data-color="${color}"${iconColor ? ` data-icon="${iconColor}"` : ''} data-bg="${winBg}" data-position="${position}" async></script>`
     : ''
   const embedWa = widget
-    ? `<script src="${PANEL_ORIGIN}/widget.js" data-mode="whatsapp" data-phone="${waPhone || '48XXXXXXXXX'}" data-color="#25D366" data-position="${position}" async></script>`
+    ? `<script src="${PANEL_ORIGIN}/widget.js?v=${WIDGET_V}" data-mode="whatsapp" data-phone="${waPhone || '48XXXXXXXXX'}" data-color="#25D366" data-position="${position}" async></script>`
     : ''
 
   return (
