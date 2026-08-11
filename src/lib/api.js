@@ -62,6 +62,65 @@ export const session = {
   },
 }
 
+// ── cache SWR (pamięć + localStorage) ─────────────────────────────────────
+const cacheMem = new Map()
+const CACHE_PREFIX = 'bc:'
+
+export function cacheRead(key) {
+  if (cacheMem.has(key)) return cacheMem.get(key)
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key)
+    if (raw) {
+      const v = JSON.parse(raw)
+      cacheMem.set(key, v)
+      return v
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
+export function cacheWrite(key, data) {
+  cacheMem.set(key, data)
+  try {
+    const raw = JSON.stringify(data)
+    if (raw.length < 500_000) localStorage.setItem(CACHE_PREFIX + key, raw)
+  } catch {
+    /* quota — pomiń */
+  }
+}
+
+export function invalidateCache(prefix = '') {
+  for (const k of [...cacheMem.keys()]) if (k.startsWith(prefix)) cacheMem.delete(k)
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i)
+      if (k?.startsWith(CACHE_PREFIX + prefix)) localStorage.removeItem(k)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+// akcje tylko-do-odczytu; wszystko inne = mutacja → cache leci w całości,
+// żeby po edycji NIGDZIE nie dało się zobaczyć starych danych
+const READ_ACTIONS = new Set([
+  'login',
+  'me',
+  'ws.list',
+  'proj.list',
+  'users.list',
+  'kb.list',
+  'kb.fileUrl',
+  'advisor.get',
+  'channels.list',
+  'settings.get',
+  'stats',
+  'conv.list',
+  'conv.messages',
+])
+
 export async function api(action, payload = {}) {
   const r = await fetch(`${FN_BASE}/brain-admin`, {
     method: 'POST',
@@ -75,6 +134,7 @@ export async function api(action, payload = {}) {
     throw new Error('auth')
   }
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+  if (!READ_ACTIONS.has(action)) invalidateCache()
   return data
 }
 

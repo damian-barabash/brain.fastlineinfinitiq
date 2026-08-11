@@ -44,7 +44,8 @@ export default function Dashboard() {
 
   const S = useMemo(() => {
     if (!data) return null
-    const convs = data.conversations
+    // najnowsze rozmowy na górze
+    const convs = [...data.conversations].sort((a, b) => new Date(b.last_at || b.started_at) - new Date(a.last_at || a.started_at))
     const msgs = data.messages
     const aiMsgs = msgs.filter((m) => m.role === 'assistant')
     const userMsgs = msgs.filter((m) => m.role === 'user')

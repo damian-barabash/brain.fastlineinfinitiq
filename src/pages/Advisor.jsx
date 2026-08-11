@@ -58,13 +58,15 @@ function Archetype({ projId }) {
   const [cfg, setCfg] = useState(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
+  const dirtyRef = useRef(false)
 
   useEffect(() => {
-    // sieć nadpisuje tylko dopóki użytkownik nie zaczął edytować
-    if (cached && cfg === null) setCfg(cached.config || {})
-  }, [cached]) // eslint-disable-line react-hooks/exhaustive-deps
+    // świeże dane z sieci nadpisują formularz dopóki użytkownik nic nie zmienił
+    if (cached && !dirtyRef.current) setCfg(cached.config || {})
+  }, [cached])
 
   function set(k, v) {
+    dirtyRef.current = true
     setCfg((c) => ({ ...c, [k]: v }))
     setSaved(false)
   }
@@ -72,6 +74,7 @@ function Archetype({ projId }) {
     setBusy(true)
     try {
       await api('advisor.set', { project_id: projId, config: cfg })
+      dirtyRef.current = false
       setSaved(true)
     } finally {
       setBusy(false)
@@ -286,17 +289,21 @@ function Integrations({ projId, channels, refreshChannels }) {
   const [position, setPosition] = useState(widget?.config?.position || 'left')
   const [waPhone, setWaPhone] = useState(widget?.config?.wa_phone || '')
   const [savedW, setSavedW] = useState(false)
+  const dirtyW = useRef(false)
+  const widgetCfgKey = JSON.stringify(widget?.config ?? null)
 
   useEffect(() => {
-    if (widget) {
+    // świeży config z sieci wchodzi do pól dopóki użytkownik nic nie zmienił
+    if (widget && !dirtyW.current) {
       setColor(widget.config?.color || '#B8FF00')
       setPosition(widget.config?.position || 'left')
       setWaPhone(widget.config?.wa_phone || '')
     }
-  }, [widget?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [widget?.id, widgetCfgKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function saveWidget() {
     await api('channels.update', { id: widget.id, config: { ...widget.config, color, position, wa_phone: waPhone } })
+    dirtyW.current = false
     await refreshChannels()
     setSavedW(true)
     setTimeout(() => setSavedW(false), 1600)
@@ -329,17 +336,17 @@ function Integrations({ projId, channels, refreshChannels }) {
             <label className="f" style={{ margin: 0 }}>
               <span className="mono">Kolor</span>
               <div className="row">
-                <input type="color" value={/^#([0-9a-f]{6})$/i.test(color) ? color : '#B8FF00'} onChange={(e) => setColor(e.target.value)} style={{ width: 46, height: 38, padding: 3 }} />
-                <input value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 110 }} />
+                <input type="color" value={/^#([0-9a-f]{6})$/i.test(color) ? color : '#B8FF00'} onChange={(e) => { dirtyW.current = true; setColor(e.target.value) }} style={{ width: 46, height: 38, padding: 3 }} />
+                <input value={color} onChange={(e) => { dirtyW.current = true; setColor(e.target.value) }} style={{ width: 110 }} />
               </div>
             </label>
             <label className="f" style={{ margin: 0 }}>
               <span className="mono">Pozycja</span>
               <div className="chips">
-                <button type="button" className={position === 'left' ? 'on' : ''} onClick={() => setPosition('left')}>
+                <button type="button" className={position === 'left' ? 'on' : ''} onClick={() => { dirtyW.current = true; setPosition('left') }}>
                   Lewy róg
                 </button>
-                <button type="button" className={position === 'right' ? 'on' : ''} onClick={() => setPosition('right')}>
+                <button type="button" className={position === 'right' ? 'on' : ''} onClick={() => { dirtyW.current = true; setPosition('right') }}>
                   Prawy róg
                 </button>
               </div>
@@ -363,7 +370,7 @@ function Integrations({ projId, channels, refreshChannels }) {
           </p>
           <label className="f">
             <span className="mono">Numer WhatsApp (z kodem kraju, bez +)</span>
-            <input value={waPhone} onChange={(e) => setWaPhone(e.target.value)} placeholder="48600000000" />
+            <input value={waPhone} onChange={(e) => { dirtyW.current = true; setWaPhone(e.target.value) }} placeholder="48600000000" />
           </label>
           <div className="row" style={{ marginBottom: 14 }}>
             <button className="btn" onClick={saveWidget}>
@@ -447,16 +454,19 @@ function MetaChannel({ projId, channels, refreshChannels, type, icon, title, fie
   const [cfg, setCfg] = useState(existing?.config || {})
   const [open, setOpen] = useState(false)
   const [saved, setSaved] = useState(false)
+  const dirty = useRef(false)
+  const cfgKey = JSON.stringify(existing?.config ?? null)
 
   useEffect(() => {
-    setCfg(existing?.config || {})
-  }, [existing?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (!dirty.current) setCfg(existing?.config || {})
+  }, [existing?.id, cfgKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function save() {
     const config = { ...cfg }
     if (!config.verify_token) config.verify_token = crypto.randomUUID().replaceAll('-', '').slice(0, 24)
     if (existing) await api('channels.update', { id: existing.id, config })
     else await api('channels.create', { project_id: projId, type, name: title, config })
+    dirty.current = false
     await refreshChannels()
     setSaved(true)
     setTimeout(() => setSaved(false), 1600)
@@ -482,14 +492,14 @@ function MetaChannel({ projId, channels, refreshChannels, type, icon, title, fie
           {fields.map(([k, label]) => (
             <label className="f" key={k}>
               <span className="mono">{label}</span>
-              <input value={cfg[k] || ''} onChange={(e) => setCfg((c) => ({ ...c, [k]: e.target.value }))} />
+              <input value={cfg[k] || ''} onChange={(e) => { dirty.current = true; setCfg((c) => ({ ...c, [k]: e.target.value })) }} />
             </label>
           ))}
           <label className="f">
             <span className="mono">Token weryfikacji webhooka</span>
             <input
               value={cfg.verify_token || ''}
-              onChange={(e) => setCfg((c) => ({ ...c, verify_token: e.target.value }))}
+              onChange={(e) => { dirty.current = true; setCfg((c) => ({ ...c, verify_token: e.target.value })) }}
               placeholder="zostanie wygenerowany przy zapisie"
             />
           </label>
