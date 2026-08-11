@@ -1,6 +1,7 @@
 // Baza wiedzy: dane firmy (ogólne) + produkty (każdy z własną wiedzą i opiekunem sprzedaży).
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api, session } from '../lib/api.js'
+import { useCached } from '../lib/useCached.js'
 import {
   IcPlus,
   IcTrash,
@@ -16,21 +17,12 @@ import {
 
 export default function Knowledge() {
   const proj = session.proj
-  const [products, setProducts] = useState(null)
-  const [items, setItems] = useState(null)
+  const [data, load] = useCached('kb.list', { project_id: proj.id })
   const [modal, setModal] = useState(null) // {kind:'item', productId} | {kind:'product', product?}
 
-  async function load() {
-    const d = await api('kb.list', { project_id: proj.id })
-    setProducts(d.products)
-    setItems(d.items)
-  }
-  useEffect(() => {
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proj.id])
-
-  if (!items) return <p className="muted">Ładowanie…</p>
+  if (!data) return <p className="muted">Ładowanie…</p>
+  const products = data.products
+  const items = data.items
   const firmItems = items.filter((i) => !i.product_id)
 
   return (

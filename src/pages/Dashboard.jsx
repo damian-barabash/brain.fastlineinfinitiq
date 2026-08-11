@@ -1,6 +1,7 @@
 // Dashboard: Przegląd / Konwersacje / Porównanie kosztów.
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api, session } from '../lib/api.js'
+import { useCached } from '../lib/useCached.js'
 import { LineChart, Bars, Donut, StatCard } from '../components/Charts.jsx'
 import {
   IcClock,
@@ -38,13 +39,8 @@ export default function Dashboard() {
   const [days, setDays] = useState(30)
   const [channel, setChannel] = useState('')
   const [tab, setTab] = useState('overview')
-  const [data, setData] = useState(null)
   const [wage, setWage] = useState(45) // zł/h — do porównania kosztów
-
-  useEffect(() => {
-    setData(null)
-    api('stats', { project_id: proj.id, days, channel_type: channel || undefined }).then(setData).catch(() => setData({ conversations: [], messages: [] }))
-  }, [proj.id, days, channel])
+  const [data, refresh] = useCached('stats', { project_id: proj.id, days, channel_type: channel || undefined })
 
   const S = useMemo(() => {
     if (!data) return null
@@ -145,7 +141,7 @@ export default function Dashboard() {
 
       {!S && <p className="muted">Ładowanie danych…</p>}
       {S && tab === 'overview' && <Overview S={S} />}
-      {S && tab === 'convs' && <Conversations S={S} projId={proj.id} refetch={() => api('stats', { project_id: proj.id, days, channel_type: channel || undefined }).then(setData)} />}
+      {S && tab === 'convs' && <Conversations S={S} projId={proj.id} refetch={refresh} />}
       {S && tab === 'costs' && <Costs S={S} wage={wage} setWage={setWage} />}
     </>
   )
@@ -185,7 +181,7 @@ function Overview({ S }) {
         <StatCard icon={<IcEye />} label="Godzina szczytu" value={S.userMsgs ? `${S.peakHour}:00` : '—'} />
       </div>
       <div className="spacer" />
-      <div className="grid g2">
+      <div className="grid gch">
         <div className="card chart-card">
           <h3>Zaoszczędzony czas</h3>
           <LineChart series={S.savedSeries} labels={S.labels} unit="min" />
@@ -321,7 +317,7 @@ function Costs({ S, wage, setWage }) {
         <StatCard icon={<IcPulse />} label="Śr. czas odpowiedzi AI" value={S.avgLatency || '—'} suffix="s" />
       </div>
       <div className="spacer" />
-      <div className="grid g2">
+      <div className="grid gch">
         <div className="card chart-card">
           <h3>Oszczędność narastająco</h3>
           <LineChart

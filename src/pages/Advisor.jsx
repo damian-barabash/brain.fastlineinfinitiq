@@ -1,6 +1,7 @@
 // AI Doradca: Archetyp / Test rozmowy / Integracje (widget embed + Meta API).
 import { useEffect, useRef, useState } from 'react'
 import { api, session, chatStream, FN_BASE, PANEL_ORIGIN } from '../lib/api.js'
+import { useCached } from '../lib/useCached.js'
 import {
   IcCheck,
   IcSend,
@@ -18,11 +19,8 @@ const TONES = ['Profesjonalny', 'Przyjazny', 'Ekspercki', 'Energiczny', 'Spokojn
 export default function Advisor() {
   const proj = session.proj
   const [tab, setTab] = useState('archetype')
-  const [channels, setChannels] = useState(null)
-
-  useEffect(() => {
-    api('channels.list', { project_id: proj.id }).then((d) => setChannels(d.channels))
-  }, [proj.id])
+  const [chData, refreshChannels] = useCached('channels.list', { project_id: proj.id })
+  const channels = chData?.channels ?? null
 
   return (
     <>
@@ -49,20 +47,22 @@ export default function Advisor() {
       </div>
       {tab === 'archetype' && <Archetype projId={proj.id} />}
       {tab === 'test' && <TestChat channels={channels} />}
-      {tab === 'integrations' && <Integrations projId={proj.id} channels={channels} setChannels={setChannels} />}
+      {tab === 'integrations' && <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />}
     </>
   )
 }
 
 // ── Archetyp ────────────────────────────────────────────────────────────────
 function Archetype({ projId }) {
+  const [cached] = useCached('advisor.get', { project_id: projId })
   const [cfg, setCfg] = useState(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    api('advisor.get', { project_id: projId }).then((d) => setCfg(d.config || {}))
-  }, [projId])
+    // sieć nadpisuje tylko dopóki użytkownik nie zaczął edytować
+    if (cached && cfg === null) setCfg(cached.config || {})
+  }, [cached]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function set(k, v) {
     setCfg((c) => ({ ...c, [k]: v }))
@@ -280,7 +280,7 @@ function CodeBox({ code }) {
   )
 }
 
-function Integrations({ projId, channels, setChannels }) {
+function Integrations({ projId, channels, refreshChannels }) {
   const widget = channels?.find((c) => c.type === 'widget')
   const [color, setColor] = useState(widget?.config?.color || '#B8FF00')
   const [position, setPosition] = useState(widget?.config?.position || 'left')
@@ -297,8 +297,7 @@ function Integrations({ projId, channels, setChannels }) {
 
   async function saveWidget() {
     await api('channels.update', { id: widget.id, config: { ...widget.config, color, position, wa_phone: waPhone } })
-    const d = await api('channels.list', { project_id: projId })
-    setChannels(d.channels)
+    await refreshChannels()
     setSavedW(true)
     setTimeout(() => setSavedW(false), 1600)
   }
@@ -386,7 +385,7 @@ function Integrations({ projId, channels, setChannels }) {
         <MetaChannel
           projId={projId}
           channels={channels}
-          setChannels={setChannels}
+          refreshChannels={refreshChannels}
           type="facebook"
           icon={<IcFacebook style={{ width: 18, height: 18 }} />}
           title="Facebook Messenger"
@@ -404,7 +403,7 @@ function Integrations({ projId, channels, setChannels }) {
         <MetaChannel
           projId={projId}
           channels={channels}
-          setChannels={setChannels}
+          refreshChannels={refreshChannels}
           type="instagram"
           icon={<IcInstagram style={{ width: 18, height: 18 }} />}
           title="Instagram DM"
@@ -423,7 +422,7 @@ function Integrations({ projId, channels, setChannels }) {
         <MetaChannel
           projId={projId}
           channels={channels}
-          setChannels={setChannels}
+          refreshChannels={refreshChannels}
           type="whatsapp"
           icon={<IcWhatsApp style={{ width: 18, height: 18 }} />}
           title="WhatsApp Business API"
@@ -443,7 +442,7 @@ function Integrations({ projId, channels, setChannels }) {
   )
 }
 
-function MetaChannel({ projId, channels, setChannels, type, icon, title, fields, steps }) {
+function MetaChannel({ projId, channels, refreshChannels, type, icon, title, fields, steps }) {
   const existing = channels.find((c) => c.type === type)
   const [cfg, setCfg] = useState(existing?.config || {})
   const [open, setOpen] = useState(false)
@@ -458,18 +457,19 @@ function MetaChannel({ projId, channels, setChannels, type, icon, title, fields,
     if (!config.verify_token) config.verify_token = crypto.randomUUID().replaceAll('-', '').slice(0, 24)
     if (existing) await api('channels.update', { id: existing.id, config })
     else await api('channels.create', { project_id: projId, type, name: title, config })
-    const d = await api('channels.list', { project_id: projId })
-    setChannels(d.channels)
+    await refreshChannels()
     setSaved(true)
     setTimeout(() => setSaved(false), 1600)
   }
 
   const connected = existing && fields.every(([k]) => existing.config?.[k])
   return (
-    <div className="card">
-      <div className="row" style={{ marginBottom: 10 }}>
-        <span style={{ color: 'var(--acid)' }}>{icon}</span>
+    <div className="card meta-card">
+      <div className="mc-head">
+        <span style={{ color: 'var(--acid)', flexShrink: 0, display: 'grid' }}>{icon}</span>
         <b>{title}</b>
+      </div>
+      <div className="mc-badges">
         {connected ? <span className="badge acid">Skonfigurowany</span> : <span className="badge">Nieaktywny</span>}
         {saved && <span className="badge ok">Zapisano</span>}
       </div>

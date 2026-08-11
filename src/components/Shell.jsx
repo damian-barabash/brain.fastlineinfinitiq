@@ -1,7 +1,8 @@
 // Layout panelu: wysuwane menu (zwinięte = same ikony) + content.
 import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom'
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { api, session, getTheme, setTheme } from '../lib/api.js'
+import { warm } from '../lib/useCached.js'
 import {
   IcDash,
   IcBot,
@@ -28,6 +29,23 @@ export default function Shell() {
   const user = session.user
   const ws = session.ws
   const proj = session.proj
+
+  // prefetch: chunki stron + dane wszystkich sekcji — nawigacja bez czekania
+  useEffect(() => {
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300))
+    idle(() => {
+      import('../pages/Dashboard.jsx')
+      import('../pages/Advisor.jsx')
+      import('../pages/Knowledge.jsx')
+      import('../pages/Settings.jsx')
+      if (user?.role === 'admin') import('../pages/AdminPanel.jsx')
+      warm('stats', { project_id: proj.id, days: 30, channel_type: undefined })
+      warm('kb.list', { project_id: proj.id })
+      warm('channels.list', { project_id: proj.id })
+      warm('advisor.get', { project_id: proj.id })
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proj.id])
 
   function toggleTheme() {
     const t = theme === 'dark' ? 'light' : 'dark'

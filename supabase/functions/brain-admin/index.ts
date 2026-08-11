@@ -20,7 +20,7 @@ const J = (data: unknown, status = 200) =>
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 
-const SESSION_DAYS = 30;
+const SESSION_DAYS = 12; // sesja trzyma 12 dni od OSTATNIEJ aktywności (przesuwane okno)
 const now = () => new Date();
 
 function newToken() {
@@ -43,9 +43,18 @@ async function getUser(token: string | undefined): Promise<User | null> {
     .eq("token", token)
     .maybeSingle();
   if (!data || !data.brain_users) return null;
-  if (new Date(data.expires_at) < now()) return null;
+  const expires = new Date(data.expires_at);
+  if (expires < now()) return null;
   const u = data.brain_users as unknown as User & { disabled: boolean };
   if (u.disabled) return null;
+  // przesuwane okno: każda aktywność odnawia sesję do pełnych 12 dni
+  // (aktualizacja najwyżej raz na ~dobę, żeby nie pisać do bazy przy każdym żądaniu)
+  if (expires.getTime() - Date.now() < (SESSION_DAYS - 1) * 864e5) {
+    await db
+      .from("brain_sessions")
+      .update({ expires_at: new Date(Date.now() + SESSION_DAYS * 864e5).toISOString() })
+      .eq("token", token);
+  }
   return u;
 }
 
@@ -65,13 +74,18 @@ async function assertProject(u: User, projectId: string) {
 }
 
 function stripHtml(html: string): string {
+  const NAMED: Record<string, string> = {
+    nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'",
+    oacute: "ó", Oacute: "Ó", eacute: "é", ndash: "–", mdash: "—",
+    laquo: "«", raquo: "»", bdquo: "„", rdquo: "”", hellip: "…",
+  };
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&[a-z]+;/gi, " ")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&([a-z]+);/gi, (m, n: string) => NAMED[n] ?? " ")
     .replace(/\s+/g, " ")
     .trim();
 }

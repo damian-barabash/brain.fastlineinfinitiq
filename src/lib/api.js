@@ -50,6 +50,15 @@ export const session = {
   },
   clear() {
     for (const k of [LS.token, LS.user, LS.ws, LS.proj]) localStorage.removeItem(k)
+    // cache danych innego użytkownika nie może przetrwać wylogowania
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i)
+        if (k?.startsWith('bc:')) localStorage.removeItem(k)
+      }
+    } catch {
+      /* ignore */
+    }
   },
 }
 

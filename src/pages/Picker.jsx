@@ -2,25 +2,24 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, session } from '../lib/api.js'
+import { useCached, invalidate } from '../lib/useCached.js'
 import { IcFolder, IcBox, IcPlus, IcLogout, IcArrowR } from '../components/Icons.jsx'
 
 export default function Picker() {
   const nav = useNavigate()
   const user = session.user
   const [ws, setWs] = useState(null) // wybrany workspace
-  const [workspaces, setWorkspaces] = useState(null)
+  const [wsData, refreshWs] = useCached('ws.list', {})
+  const workspaces = wsData?.workspaces ?? null
   const [projects, setProjects] = useState(null)
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    api('ws.list').then((d) => {
-      setWorkspaces(d.workspaces)
-      // klient z jednym workspace — od razu do projektów
-      if (user?.role !== 'admin' && d.workspaces.length === 1) pick(d.workspaces[0])
-    })
+    // klient z jednym workspace — od razu do projektów
+    if (user?.role !== 'admin' && workspaces?.length === 1 && !ws) pick(workspaces[0])
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [workspaces])
 
   async function pick(w) {
     setWs(w)
@@ -35,7 +34,8 @@ export default function Picker() {
     try {
       const { workspace } = await api('ws.create', { name: newName.trim() })
       setNewName('')
-      setWorkspaces((l) => [...l, workspace])
+      invalidate('ws.list')
+      refreshWs()
       pick(workspace)
     } finally {
       setBusy(false)
