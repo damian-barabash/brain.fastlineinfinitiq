@@ -140,7 +140,7 @@ export function Donut({ items, size = 210 }) {
             />
           )
         })}
-        <text x="70" y="66" textAnchor="middle" fill="var(--text)" fontSize="24" fontFamily="Archivo" fontWeight="900">
+        <text x="70" y="66" textAnchor="middle" fill="var(--text)" fontSize="24" fontFamily="Space Grotesk" fontWeight="700">
           {total === 1 && items.every((i) => !i.value) ? 0 : total}
         </text>
         <text x="70" y="84" textAnchor="middle" fill="var(--dim)" fontSize="10" fontFamily="IBM Plex Mono">

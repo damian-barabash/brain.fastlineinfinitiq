@@ -102,7 +102,7 @@ export default function Demo() {
         <div className="row" style={{ padding: '14px 18px', borderBottom: '1px solid var(--line)' }}>
           <span className="dot" />
           <div>
-            <b style={{ fontFamily: 'Archivo, sans-serif', fontStretch: '125%', textTransform: 'uppercase', fontSize: 14, letterSpacing: '.02em', display: 'block' }}>
+            <b style={{ fontFamily: 'Space Grotesk, sans-serif', textTransform: 'uppercase', fontSize: 14, letterSpacing: '.02em', display: 'block' }}>
               {hello?.persona || 'Asystent AI'}
             </b>
             {hello?.project && (

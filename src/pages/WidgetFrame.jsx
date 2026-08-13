@@ -92,7 +92,7 @@ export default function WidgetFrame() {
         style={{ padding: '13px 16px', background: color, color: ink, flexShrink: 0 }}
       >
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: ink, opacity: 0.85 }} />
-        <b style={{ fontFamily: 'Archivo, sans-serif', fontStretch: '125%', textTransform: 'uppercase', fontSize: 13.5, letterSpacing: '.02em' }}>
+        <b style={{ fontFamily: 'Space Grotesk, sans-serif', textTransform: 'uppercase', fontSize: 13.5, letterSpacing: '.02em' }}>
           {hello?.persona || 'Asystent AI'}
         </b>
         <button

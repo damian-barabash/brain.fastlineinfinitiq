@@ -73,9 +73,9 @@ h1,
 h2,
 h3,
 .display {
-  font-family: 'Archivo', sans-serif;
-  font-stretch: 125%;
-  font-weight: 800;
+  font-family: 'Space Grotesk', sans-serif;
+  font-stretch: normal;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.01em;
   line-height: 1.05;
@@ -311,9 +311,9 @@ label.f > span {
   border: 1px solid var(--line);
 }
 .sb-logo .word {
-  font-family: 'Archivo', sans-serif;
-  font-stretch: 125%;
-  font-weight: 800;
+  font-family: 'Space Grotesk', sans-serif;
+  font-stretch: normal;
+  font-weight: 700;
   text-transform: uppercase;
   font-size: 15px;
   letter-spacing: 0.02em;
@@ -447,9 +447,9 @@ label.f > span {
   line-height: 1.3;
 }
 .stat .val {
-  font-family: 'Archivo', sans-serif;
-  font-stretch: 125%;
-  font-weight: 900;
+  font-family: 'Space Grotesk', sans-serif;
+  font-stretch: normal;
+  font-weight: 700;
   font-size: 26px;
   line-height: 1.1;
 }
@@ -490,16 +490,16 @@ label.f > span {
   opacity: 0.75;
 }
 .hero-band .hb-val {
-  font-family: 'Archivo', sans-serif;
-  font-stretch: 125%;
-  font-weight: 900;
+  font-family: 'Space Grotesk', sans-serif;
+  font-stretch: normal;
+  font-weight: 700;
   font-size: clamp(30px, 4vw, 44px);
   text-transform: uppercase;
   line-height: 1;
 }
 .hero-band .hb-val small {
   font-size: 0.45em;
-  font-weight: 800;
+  font-weight: 700;
 }
 .hero-band .hb-sub {
   font-size: 13px;
