@@ -73,6 +73,19 @@ async function assertProject(u: User, projectId: string) {
   if (!ws || !wsAllowed(u, ws)) throw new Error("forbidden");
 }
 
+// pola leada z body — trim + walidacja enumów
+function leadRow(b: Record<string, unknown>) {
+  return {
+    name: String(b.name ?? "").trim().slice(0, 200),
+    email: String(b.email ?? "").trim().toLowerCase().slice(0, 200),
+    phone: String(b.phone ?? "").trim().slice(0, 40),
+    company: String(b.company ?? "").trim().slice(0, 200),
+    temp: b.temp === "warm" ? "warm" : "cold",
+    channel: b.channel === "whatsapp" ? "whatsapp" : "email",
+    notes: String(b.notes ?? "").slice(0, 2000),
+  };
+}
+
 // "3 200,50" / "3200.50" / 3200 → 3200.50; puste/nieparsowalne → null
 function parsePrice(v: unknown): number | null {
   if (v === undefined || v === null || v === "") return null;
@@ -429,6 +442,132 @@ Deno.serve(async (req) => {
         await assertProject(user, it.project_id);
         const { data } = await db.storage.from("brain-kb").createSignedUrl(it.file_path, 3600);
         return J({ url: data?.signedUrl });
+      }
+
+      // ── sprzedawca (AI sales) ─────────────────────────────────────────
+      case "sales.get": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const { data } = await db.from("brain_sales").select("config, updated_at").eq("project_id", pid).maybeSingle();
+        let config = (data?.config ?? {}) as Record<string, unknown>;
+        if (!config.hook_key) {
+          // sekret webhooków/akcji panelu — generowany raz na projekt
+          config = { ...config, hook_key: newToken() };
+          await db.from("brain_sales").upsert({ project_id: pid, config, updated_at: new Date().toISOString() });
+        }
+        return J({ config });
+      }
+      case "sales.set": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const incoming = (body.config ?? {}) as Record<string, unknown>;
+        const { data: cur } = await db.from("brain_sales").select("config").eq("project_id", pid).maybeSingle();
+        const hook_key = (cur?.config as Record<string, unknown>)?.hook_key ?? newToken();
+        await db
+          .from("brain_sales")
+          .upsert({ project_id: pid, config: { ...incoming, hook_key }, updated_at: new Date().toISOString() });
+        return J({ ok: true });
+      }
+      case "leads.list": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        let q = db
+          .from("brain_leads")
+          .select("*")
+          .eq("project_id", pid)
+          .order("updated_at", { ascending: false })
+          .limit(Math.min(Number(body.limit) || 500, 1000));
+        if (body.status) q = q.eq("status", String(body.status));
+        const { data } = await q;
+        return J({ leads: data ?? [] });
+      }
+      case "leads.create": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const row = leadRow(body);
+        if (!row.email && !row.phone) return J({ error: "lead musi mieć e-mail albo telefon" }, 400);
+        const { data, error } = await db.from("brain_leads").insert({ project_id: pid, ...row }).select().single();
+        if (error) return J({ error: error.message.includes("duplicate") ? "taki lead już istnieje" : error.message }, 400);
+        return J({ lead: data });
+      }
+      case "leads.import": {
+        // bulk: [{name,email,phone,company,temp,notes}] — duplikaty (e-mail/telefon) pomijane
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const rows = (Array.isArray(body.rows) ? body.rows : []).slice(0, 2000).map(leadRow).filter((r) => r.email || r.phone);
+        const { data: existing } = await db.from("brain_leads").select("email, phone").eq("project_id", pid);
+        const seenE = new Set((existing ?? []).map((l) => l.email.toLowerCase()).filter(Boolean));
+        const seenP = new Set((existing ?? []).map((l) => l.phone.replace(/[^\d]/g, "")).filter(Boolean));
+        const fresh: typeof rows = [];
+        let skipped = 0;
+        for (const r of rows) {
+          const e = r.email.toLowerCase();
+          const p = r.phone.replace(/[^\d]/g, "");
+          if ((e && seenE.has(e)) || (p && seenP.has(p))) {
+            skipped++;
+            continue;
+          }
+          if (e) seenE.add(e);
+          if (p) seenP.add(p);
+          fresh.push(r);
+        }
+        if (fresh.length) {
+          const { error } = await db.from("brain_leads").insert(fresh.map((r) => ({ project_id: pid, ...r })));
+          if (error) throw error;
+        }
+        return J({ added: fresh.length, skipped });
+      }
+      case "leads.update": {
+        const { data: l } = await db.from("brain_leads").select("project_id").eq("id", body.id as string).maybeSingle();
+        if (!l) return J({ error: "not found" }, 404);
+        await assertProject(user, l.project_id);
+        const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+        for (const k of ["name", "email", "phone", "company", "temp", "status", "channel", "notes", "unread"]) {
+          if (body[k] !== undefined) patch[k] = body[k];
+        }
+        // ręczne zamknięcie/wstrzymanie kasuje zaplanowany follow-up
+        if (["won", "lost", "opt_out", "paused", "handoff"].includes(String(patch.status ?? ""))) patch.next_at = null;
+        if (patch.status === "new") {
+          patch.attempts = 0;
+          patch.next_at = null;
+        }
+        await db.from("brain_leads").update(patch).eq("id", body.id as string);
+        return J({ ok: true });
+      }
+      case "leads.delete": {
+        const { data: l } = await db.from("brain_leads").select("project_id").eq("id", body.id as string).maybeSingle();
+        if (!l) return J({ error: "not found" }, 404);
+        await assertProject(user, l.project_id);
+        await db.from("brain_leads").delete().eq("id", body.id as string);
+        return J({ ok: true });
+      }
+      case "lead.messages": {
+        const { data: l } = await db.from("brain_leads").select("project_id").eq("id", body.lead_id as string).maybeSingle();
+        if (!l) return J({ error: "not found" }, 404);
+        await assertProject(user, l.project_id);
+        const { data } = await db
+          .from("brain_lead_messages")
+          .select("id, channel, direction, subject, content, status, meta, created_at")
+          .eq("lead_id", body.lead_id as string)
+          .order("id");
+        await db.from("brain_leads").update({ unread: false }).eq("id", body.lead_id as string);
+        return J({ messages: data ?? [] });
+      }
+      case "sales.stats": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const days = Math.min(Number(body.days) || 30, 90);
+        const since = new Date(Date.now() - days * 864e5).toISOString();
+        const [{ data: leads }, { data: msgs }] = await Promise.all([
+          db.from("brain_leads").select("id, status, temp, channel, unread, created_at").eq("project_id", pid).limit(5000),
+          db
+            .from("brain_lead_messages")
+            .select("direction, channel, status, created_at")
+            .eq("project_id", pid)
+            .gte("created_at", since)
+            .limit(10000),
+        ]);
+        return J({ leads: leads ?? [], messages: msgs ?? [] });
       }
 
       // ── advisor ───────────────────────────────────────────────────────

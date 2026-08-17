@@ -119,6 +119,10 @@ const READ_ACTIONS = new Set([
   'stats',
   'conv.list',
   'conv.messages',
+  'sales.get',
+  'sales.stats',
+  'leads.list',
+  'lead.messages',
 ])
 
 export async function api(action, payload = {}) {
@@ -135,6 +139,20 @@ export async function api(action, payload = {}) {
   }
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
   if (!READ_ACTIONS.has(action)) invalidateCache()
+  return data
+}
+
+// Akcje sprzedawcy wykonywane bezpośrednio na brain-sales (autoryzacja hook_key z sales.get):
+// preview / send / test — długie (generacja AI, wysyłka), nie przechodzą przez brain-admin.
+export async function salesApi(hookKey, action, payload = {}) {
+  const r = await fetch(`${FN_BASE}/brain-sales`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, key: hookKey, ...payload }),
+  })
+  const data = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
+  if (action === 'send') invalidateCache()
   return data
 }
 

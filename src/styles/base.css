@@ -853,3 +853,19 @@ label.f > span {
     font-size: 20px;
   }
 }
+
+/* ── Sprzedawca: historia korespondencji z leadem ── */
+.lm {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.lm[data-dir='out'] {
+  border-left: 3px solid var(--acid);
+}
+.lm[data-dir='in'] {
+  border-left: 3px solid var(--warn);
+}
+.lm .mono {
+  color: var(--dim);
+}

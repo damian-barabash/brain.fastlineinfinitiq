@@ -15,6 +15,8 @@ import {
   IcWallet,
   IcEye,
   IcX,
+  IcSend,
+  IcMsg,
 } from '../components/Icons.jsx'
 
 const SAVED_MIN_PER_REPLY = 2 // minuty pracy człowieka na jedną odpowiedź
@@ -138,9 +140,13 @@ export default function Dashboard() {
         <button className={tab === 'costs' ? 'on' : ''} onClick={() => setTab('costs')}>
           Porównanie
         </button>
+        <button className={tab === 'sales' ? 'on' : ''} onClick={() => setTab('sales')}>
+          Sprzedawca
+        </button>
       </div>
 
-      {!S && <p className="muted">Ładowanie danych…</p>}
+      {tab === 'sales' && <SalesStats projId={proj.id} days={days} />}
+      {tab !== 'sales' && !S && <p className="muted">Ładowanie danych…</p>}
       {S && tab === 'overview' && <Overview S={S} />}
       {S && tab === 'convs' && <Conversations S={S} projId={proj.id} refetch={refresh} />}
       {S && tab === 'costs' && <Costs S={S} wage={wage} setWage={setWage} />}
@@ -214,6 +220,99 @@ function Overview({ S }) {
             }))}
           />
           {!Object.keys(S.byChannel).length && <p className="muted">Brak danych w tym okresie.</p>}
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── Sprzedawca: skuteczność bez pieniędzy (lidzi, wiadomości, odpowiedzi) ──
+function SalesStats({ projId, days }) {
+  const [data] = useCached('sales.stats', { project_id: projId, days })
+  const S = useMemo(() => {
+    if (!data) return null
+    const leads = data.leads
+    const msgs = data.messages
+    const by = {}
+    for (const l of leads) by[l.status] = (by[l.status] || 0) + 1
+    const contactedEver = leads.filter((l) => !['new', 'paused'].includes(l.status)).length
+    const repliedEver = (by.replied || 0) + (by.won || 0) + (by.handoff || 0) + (by.lost || 0)
+    const responseRate = contactedEver ? Math.round((repliedEver / contactedEver) * 100) : 0
+    const out = msgs.filter((m) => m.direction === 'out' && m.status === 'sent')
+    const inc = msgs.filter((m) => m.direction === 'in')
+    const failed = msgs.filter((m) => m.status === 'failed').length
+    const daysArr = []
+    for (let i = days - 1; i >= 0; i--) daysArr.push(dayKey(new Date(Date.now() - i * 864e5).toISOString()))
+    const perDay = (rows) => {
+      const map = Object.fromEntries(daysArr.map((d) => [d, 0]))
+      for (const r of rows) {
+        const k = dayKey(r.created_at)
+        if (k in map) map[k]++
+      }
+      return daysArr.map((d) => map[d])
+    }
+    return {
+      total: leads.length,
+      by,
+      unread: leads.filter((l) => l.unread).length,
+      responseRate,
+      out: out.length,
+      inc: inc.length,
+      failed,
+      outSeries: perDay(out),
+      incSeries: perDay(inc),
+      labels: daysArr.map(fmtDay),
+    }
+  }, [data, days])
+
+  if (!S) return <p className="muted">Ładowanie danych…</p>
+  return (
+    <>
+      <div className="grid g4">
+        <StatCard icon={<IcUser />} label="Lidzi w bazie" value={S.total} />
+        <StatCard icon={<IcSend />} label="Wiadomości wysłane przez AI" value={S.out} />
+        <StatCard icon={<IcMsg />} label="Odpowiedzi od klientów" value={S.inc} tone="var(--ok)" />
+        <StatCard icon={<IcPulse />} label="Wskaźnik odpowiedzi" value={`${S.responseRate}%`} />
+        <StatCard icon={<IcCheck />} label="Wygrane" value={S.by.won || 0} tone="var(--ok)" />
+        <StatCard icon={<IcHandoff />} label="Przekazane człowiekowi" value={S.by.handoff || 0} tone="var(--warn)" />
+        <StatCard icon={<IcX />} label="Przegrane / wypisani" value={(S.by.lost || 0) + (S.by.opt_out || 0)} />
+        <StatCard icon={<IcEye />} label="Nieprzeczytane odpowiedzi" value={S.unread} tone={S.unread ? 'var(--warn)' : undefined} />
+      </div>
+      <div className="spacer" />
+      <div className="grid gch">
+        <div className="card chart-card">
+          <h3>Wysłane przez AI</h3>
+          <LineChart series={S.outSeries} labels={S.labels} unit="wiadomości" />
+          {S.failed > 0 && <p className="chart-tip" style={{ color: 'var(--danger)' }}>Nieudane wysyłki w tym okresie: {S.failed} — sprawdź konfigurację kanałów.</p>}
+        </div>
+        <div className="card chart-card">
+          <h3>Odpowiedzi klientów</h3>
+          <LineChart series={S.incSeries} labels={S.labels} unit="odpowiedzi" color="var(--warn)" />
+        </div>
+        <div className="card chart-card">
+          <h3>Statusy lidów</h3>
+          <Donut
+            items={[
+              { label: 'Nowi', value: S.by.new || 0, color: 'var(--dim)' },
+              { label: 'W kontakcie', value: S.by.contacted || 0, color: 'var(--acid)' },
+              { label: 'Odpowiedzieli', value: S.by.replied || 0, color: 'var(--ok)' },
+              { label: 'Wygrani', value: S.by.won || 0, color: '#4dd07a' },
+              { label: 'Przegrani', value: (S.by.lost || 0) + (S.by.opt_out || 0), color: 'var(--danger)' },
+              { label: 'Inni', value: (S.by.handoff || 0) + (S.by.paused || 0), color: 'var(--warn)' },
+            ].filter((i) => i.value)}
+          />
+        </div>
+        <div className="card chart-card">
+          <h3>Lejek</h3>
+          <Bars
+            items={[
+              { label: 'Wszyscy lidzi', value: S.total },
+              { label: 'Skontaktowani', value: S.total - (S.by.new || 0) - (S.by.paused || 0), color: 'var(--acid)' },
+              { label: 'Odpowiedzieli', value: (S.by.replied || 0) + (S.by.won || 0) + (S.by.handoff || 0), color: 'var(--warn)' },
+              { label: 'Wygrani', value: S.by.won || 0, color: 'var(--ok)' },
+            ]}
+          />
+          <p className="chart-tip">Statystyka bez pieniędzy — liczy kontakty i rozmowy, nie przychód.</p>
         </div>
       </div>
     </>

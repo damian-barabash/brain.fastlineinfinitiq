@@ -265,3 +265,32 @@ export const IcKey = (p) => (
     <path d="M11 11l8-8M15.5 6.5L18 9M13 9l2 2" />
   </I>
 )
+export const IcTarget = (p) => (
+  <I {...p}>
+    <circle cx="12" cy="12" r="8" />
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 12h.01" strokeWidth="2.6" />
+  </I>
+)
+export const IcMail = (p) => (
+  <I {...p}>
+    <rect x="3" y="5" width="18" height="14" />
+    <path d="M3 7l9 6 9-6" />
+  </I>
+)
+export const IcUpload = (p) => (
+  <I {...p}>
+    <path d="M12 15V4M7.5 8.5L12 4l4.5 4.5" />
+    <path d="M4 15v5h16v-5" />
+  </I>
+)
+export const IcPause = (p) => (
+  <I {...p}>
+    <path d="M9 5v14M15 5v14" strokeWidth="2.2" />
+  </I>
+)
+export const IcPlay = (p) => (
+  <I {...p}>
+    <path d="M7 4l13 8-13 8z" />
+  </I>
+)

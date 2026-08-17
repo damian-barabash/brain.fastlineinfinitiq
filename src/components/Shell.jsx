@@ -14,10 +14,12 @@ import {
   IcMoon,
   IcChevL,
   IcChevR,
+  IcTarget,
 } from './Icons.jsx'
 
 const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
 const Advisor = lazy(() => import('../pages/Advisor.jsx'))
+const Sales = lazy(() => import('../pages/Sales.jsx'))
 const Knowledge = lazy(() => import('../pages/Knowledge.jsx'))
 const Settings = lazy(() => import('../pages/Settings.jsx'))
 const AdminPanel = lazy(() => import('../pages/AdminPanel.jsx'))
@@ -36,6 +38,7 @@ export default function Shell() {
     idle(() => {
       import('../pages/Dashboard.jsx')
       import('../pages/Advisor.jsx')
+      import('../pages/Sales.jsx')
       import('../pages/Knowledge.jsx')
       import('../pages/Settings.jsx')
       if (user?.role === 'admin') import('../pages/AdminPanel.jsx')
@@ -43,6 +46,8 @@ export default function Shell() {
       warm('kb.list', { project_id: proj.id })
       warm('channels.list', { project_id: proj.id })
       warm('advisor.get', { project_id: proj.id })
+      warm('sales.get', { project_id: proj.id })
+      warm('leads.list', { project_id: proj.id })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [proj.id])
@@ -61,6 +66,7 @@ export default function Shell() {
   const items = [
     { to: '/app/dashboard', label: 'Dashboard', icon: <IcDash /> },
     { to: '/app/advisor', label: 'AI Doradca', icon: <IcBot /> },
+    { to: '/app/sales', label: 'Sprzedawca', icon: <IcTarget /> },
     { to: '/app/knowledge', label: 'Baza wiedzy', icon: <IcBook /> },
   ]
 
@@ -126,6 +132,7 @@ export default function Shell() {
           <Routes>
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="advisor" element={<Advisor />} />
+            <Route path="sales" element={<Sales />} />
             <Route path="knowledge" element={<Knowledge />} />
             <Route path="settings" element={<Settings />} />
             {user?.role === 'admin' && <Route path="admin" element={<AdminPanel />} />}
