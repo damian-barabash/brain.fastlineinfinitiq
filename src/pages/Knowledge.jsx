@@ -378,7 +378,7 @@ function ProductModal({ projId, product, onClose, onDone }) {
           <span className="mono">Link do zakupu</span>
           <input value={f.buy_url} onChange={set('buy_url')} placeholder="https://…" />
         </label>
-        <div className="grid" style={{ gridTemplateColumns: '1.2fr 1fr 1fr' }}>
+        <div className="fgrid">
           <label className="f">
             <span className="mono">Cena (puste = brak)</span>
             <input value={f.price} onChange={set('price')} inputMode="decimal" placeholder="np. 3200 lub 349,99" />
@@ -399,7 +399,7 @@ function ProductModal({ projId, product, onClose, onDone }) {
             </select>
           </label>
         </div>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <div className="fgrid">
           <label className="f">
             <span className="mono">Opiekun sprzedaży — imię</span>
             <input value={f.sales_name} onChange={set('sales_name')} />

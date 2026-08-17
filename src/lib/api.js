@@ -156,6 +156,60 @@ export async function salesApi(hookKey, action, payload = {}) {
   return data
 }
 
+// Testowy czat sprzedawcy (SSE na brain-sales, autoryzacja demo_key). Nic nie zapisuje w bazie.
+export function salesChatStream(body, { onDelta, onDone, onError }) {
+  const ctrl = new AbortController()
+  ;(async () => {
+    try {
+      const r = await fetch(`${FN_BASE}/brain-sales`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'chat', ...body }),
+        signal: ctrl.signal,
+      })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.error || `HTTP ${r.status}`)
+      }
+      const reader = r.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const parts = buf.split('\n\n')
+        buf = parts.pop() ?? ''
+        for (const part of parts) {
+          const line = part.split('\n').find((l) => l.startsWith('data:'))
+          if (!line) continue
+          try {
+            const jd = JSON.parse(line.slice(5).trim())
+            if (jd.d) onDelta?.(jd.d)
+            else if (jd.done) onDone?.(jd)
+            else if (jd.error) onError?.(new Error(jd.error))
+          } catch {
+            /* niepełny chunk */
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') onError?.(e)
+    }
+  })()
+  return ctrl
+}
+
+export async function salesHello(key) {
+  const r = await fetch(`${FN_BASE}/brain-sales`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'hello', key }),
+  })
+  if (!r.ok) throw new Error('invalid key')
+  return r.json()
+}
+
 // Czat SSE (dowolne body: wiadomość albo action=rewrite): zwraca AbortController.
 export function chatStreamRaw(body, { onDelta, onDone, onError }) {
   const ctrl = new AbortController()

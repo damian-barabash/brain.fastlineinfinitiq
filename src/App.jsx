@@ -7,6 +7,7 @@ import Shell from './components/Shell.jsx'
 
 const WidgetFrame = lazy(() => import('./pages/WidgetFrame.jsx'))
 const Demo = lazy(() => import('./pages/Demo.jsx'))
+const SalesDemo = lazy(() => import('./pages/SalesDemo.jsx'))
 
 function Guard({ children, needProject }) {
   const loc = useLocation()
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/w" element={<WidgetFrame />} />
         <Route path="/demo" element={<Demo />} />
+        <Route path="/sdemo" element={<SalesDemo />} />
         <Route
           path="/"
           element={

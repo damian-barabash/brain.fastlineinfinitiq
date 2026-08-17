@@ -450,9 +450,9 @@ Deno.serve(async (req) => {
         await assertProject(user, pid);
         const { data } = await db.from("brain_sales").select("config, updated_at").eq("project_id", pid).maybeSingle();
         let config = (data?.config ?? {}) as Record<string, unknown>;
-        if (!config.hook_key) {
-          // sekret webhooków/akcji panelu — generowany raz na projekt
-          config = { ...config, hook_key: newToken() };
+        if (!config.hook_key || !config.demo_key) {
+          // hook_key = sekret webhooków/akcji, demo_key = publiczny link testowego czatu
+          config = { ...config, hook_key: config.hook_key ?? newToken(), demo_key: config.demo_key ?? newToken() };
           await db.from("brain_sales").upsert({ project_id: pid, config, updated_at: new Date().toISOString() });
         }
         return J({ config });
@@ -462,11 +462,22 @@ Deno.serve(async (req) => {
         await assertProject(user, pid);
         const incoming = (body.config ?? {}) as Record<string, unknown>;
         const { data: cur } = await db.from("brain_sales").select("config").eq("project_id", pid).maybeSingle();
-        const hook_key = (cur?.config as Record<string, unknown>)?.hook_key ?? newToken();
+        const prev = (cur?.config ?? {}) as Record<string, unknown>;
+        const hook_key = prev.hook_key ?? newToken();
+        const demo_key = prev.demo_key ?? newToken();
         await db
           .from("brain_sales")
-          .upsert({ project_id: pid, config: { ...incoming, hook_key }, updated_at: new Date().toISOString() });
+          .upsert({ project_id: pid, config: { ...incoming, hook_key, demo_key }, updated_at: new Date().toISOString() });
         return J({ ok: true });
+      }
+      case "sales.rotateDemo": {
+        // nowy publiczny link testowego czatu — stary natychmiast przestaje działać
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const { data: cur } = await db.from("brain_sales").select("config").eq("project_id", pid).maybeSingle();
+        const config = { ...((cur?.config ?? {}) as Record<string, unknown>), demo_key: newToken() };
+        await db.from("brain_sales").upsert({ project_id: pid, config, updated_at: new Date().toISOString() });
+        return J({ demo_key: config.demo_key });
       }
       case "leads.list": {
         const pid = String(body.project_id || "");

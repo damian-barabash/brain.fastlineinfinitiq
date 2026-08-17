@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, session, salesApi, FN_BASE } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
+import SalesChat from '../components/SalesChat.jsx'
 import {
   IcPlus,
   IcTrash,
@@ -73,6 +74,9 @@ export default function Sales() {
         <button className={tab === 'leads' ? 'on' : ''} onClick={() => setTab('leads')}>
           Lidzi
         </button>
+        <button className={tab === 'test' ? 'on' : ''} onClick={() => setTab('test')}>
+          Test rozmowy
+        </button>
         <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>
           Ustawienia
         </button>
@@ -81,9 +85,72 @@ export default function Sales() {
         </button>
       </div>
       {tab === 'leads' && <Leads projId={proj.id} hookKey={hookKey} />}
+      {tab === 'test' && <TestChat projId={proj.id} cfgData={cfgData} refreshCfg={refreshCfg} />}
       {tab === 'settings' && <SettingsTab projId={proj.id} cfgData={cfgData} refreshCfg={refreshCfg} />}
       {tab === 'channels' && <Channels projId={proj.id} cfgData={cfgData} refreshCfg={refreshCfg} />}
     </>
+  )
+}
+
+// ── Test rozmowy ────────────────────────────────────────────────────────────
+function TestChat({ projId, cfgData, refreshCfg }) {
+  const demoKey = cfgData?.config?.demo_key
+  const [linkOk, setLinkOk] = useState(false)
+  const [rotating, setRotating] = useState(false)
+  const [chatKey, setChatKey] = useState(0) // remount czatu po "Nowa rozmowa"
+  const demoUrl = demoKey ? `${window.location.origin}/sdemo?key=${demoKey}` : ''
+
+  async function rotateLink() {
+    if (!demoKey || rotating) return
+    if (!confirm('Stary link demo natychmiast przestanie działać. Wygenerować nowy?')) return
+    setRotating(true)
+    try {
+      await api('sales.rotateDemo', { project_id: projId })
+      await refreshCfg()
+    } finally {
+      setRotating(false)
+    }
+  }
+  function newChat() {
+    try {
+      sessionStorage.removeItem(`brain_salestest:${projId}`)
+    } catch {
+      /* ignore */
+    }
+    setChatKey((k) => k + 1)
+  }
+
+  return (
+    <div className="card" style={{ height: '66vh', display: 'flex', flexDirection: 'column', padding: 0 }}>
+      <div className="row" style={{ padding: '12px 16px', borderBottom: '1px solid var(--line)', flexWrap: 'wrap' }}>
+        <span className="dot" />
+        <span className="mono" style={{ color: 'var(--text)' }}>Symulacja rozmowy — Ty grasz klienta</span>
+        <span className="right row" style={{ gap: 6, flexWrap: 'wrap' }}>
+          <button
+            className="btn sm"
+            disabled={!demoKey}
+            onClick={() => {
+              navigator.clipboard.writeText(demoUrl)
+              setLinkOk(true)
+              setTimeout(() => setLinkOk(false), 1600)
+            }}
+            title="Publiczny link demo — wyślij klientowi, otworzy sam czat bez panelu"
+          >
+            {linkOk ? <IcCheck /> : <IcCopy />} {linkOk ? 'Skopiowano' : 'Kopiuj link demo'}
+          </button>
+          <a className="btn sm" href={demoUrl || '#'} target="_blank" rel="noreferrer" aria-disabled={!demoKey}>
+            <IcEye /> Otwórz
+          </a>
+          <button className="btn sm danger" disabled={!demoKey || rotating} onClick={rotateLink} title="Unieważnij stary link i wygeneruj nowy">
+            <IcKey /> {rotating ? 'Generowanie…' : 'Nowy link'}
+          </button>
+          <button className="btn sm" onClick={newChat}>
+            <IcRefresh /> Nowa rozmowa
+          </button>
+        </span>
+      </div>
+      <SalesChat key={chatKey} demoKey={demoKey} storeKey={`brain_salestest:${projId}`} />
+    </div>
   )
 }
 
@@ -196,7 +263,7 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
             Włączony: sprzedawca sam pisze do nowych lidów i wysyła follow-upy — tylko w godzinach poniżej.
           </span>
         </label>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <div className="fgrid">
           <label className="f">
             <span className="mono">Pisze od godziny</span>
             <select value={hours.from ?? 9} onChange={(e) => setHours('from', Number(e.target.value))}>
@@ -224,7 +291,7 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
             ))}
           </div>
         </label>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
+        <div className="fgrid">
           <label className="f">
             <span className="mono">Limit dzienny wiadomości</span>
             <input type="number" min="1" max="200" value={cfg.daily_limit ?? 20} onChange={(e) => set('daily_limit', Number(e.target.value) || 20)} />
@@ -242,7 +309,7 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
           Strefa czasowa: Europe/Warsaw. Klient odpisuje → AI odpowiada od razu (o każdej porze) i prowadzi rozmowę aż do
           sprzedaży, przekazania człowiekowi albo zamknięcia. Wiadomość „STOP" wypisuje leada na stałe.
         </p>
-        <div className="row">
+        <div className="row" style={{ marginTop: 14 }}>
           <button className="btn primary" onClick={save} disabled={busy}>
             {busy ? 'Zapisywanie…' : 'Zapisz ustawienia'}
           </button>
@@ -358,7 +425,7 @@ function Channels({ projId, cfgData, refreshCfg }) {
             <span className="mono">Klucz API Resend</span>
             <input type="password" value={email.resend_key || ''} onChange={(e) => setEmail('resend_key', e.target.value)} placeholder="re_…" autoComplete="off" />
           </label>
-          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+          <div className="fgrid">
             <label className="f">
               <span className="mono">Nazwa nadawcy</span>
               <input value={email.from_name || ''} onChange={(e) => setEmail('from_name', e.target.value)} placeholder="Kacper z FIQ" />
@@ -424,7 +491,7 @@ function Channels({ projId, cfgData, refreshCfg }) {
               </button>
             </div>
           </label>
-          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+          <div className="fgrid">
             <label className="f">
               <span className="mono">Phone Number ID</span>
               <input value={wa.phone_number_id || ''} onChange={(e) => setWa('phone_number_id', e.target.value)} />
@@ -434,7 +501,7 @@ function Channels({ projId, cfgData, refreshCfg }) {
               <input type="password" value={wa.wa_token || ''} onChange={(e) => setWa('wa_token', e.target.value)} autoComplete="off" />
             </label>
           </div>
-          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+          <div className="fgrid">
             <label className="f">
               <span className="mono">Szablon pierwszego kontaktu</span>
               <input value={wa.template_name || ''} onChange={(e) => setWa('template_name', e.target.value)} placeholder="np. pierwszy_kontakt" />
@@ -779,7 +846,7 @@ function AddLeadModal({ projId, onClose, onDone }) {
     <div className="modal-bg" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal">
         <h2>Nowy lead</h2>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <div className="fgrid">
           <label className="f">
             <span className="mono">Imię i nazwisko</span>
             <input value={f.name} onChange={set('name')} />

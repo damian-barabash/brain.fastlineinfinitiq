@@ -869,3 +869,20 @@ label.f > span {
 .lm .mono {
   color: var(--dim);
 }
+
+/* pola w jednym rzędzie: inputy równo przy dolnej krawędzi, nawet gdy etykieta
+   łamie się na 2 linie; na wąskim ekranie kolumny same się zawijają */
+.fgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0 14px;
+  align-items: end;
+}
+
+/* długie URL-e / tokeny w dymkach czatu nie mogą rozpychać karty na mobile */
+.chat-msgs {
+  min-width: 0;
+}
+.chat-msgs .msg {
+  overflow-wrap: anywhere;
+}

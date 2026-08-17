@@ -86,6 +86,15 @@ async function projectByHookKey(key: string): Promise<{ projectId: string; cfg: 
   return { projectId: data.project_id, cfg: data.config as SalesCfg, name: p?.name ?? "" };
 }
 
+// klucz testowego czatu (publiczny link demo) — osobny od hook_key, można rotować bez psucia webhooków
+async function projectByDemoKey(key: string): Promise<{ projectId: string; cfg: SalesCfg; name: string } | null> {
+  if (!key || key.length < 16) return null;
+  const { data } = await db.from("brain_sales").select("project_id, config").eq("config->>demo_key", key).maybeSingle();
+  if (!data) return null;
+  const { data: p } = await db.from("brain_projects").select("name").eq("id", data.project_id).maybeSingle();
+  return { projectId: data.project_id, cfg: data.config as SalesCfg, name: p?.name ?? "" };
+}
+
 // czy teraz jest okno wysyłki (godziny + dni tygodnia, strefa klienta)
 function inHours(cfg: SalesCfg, now = new Date()): boolean {
   const h = cfg.hours ?? {};
@@ -123,6 +132,30 @@ function providerConfig(ai: AiCfg) {
   const apiKey = Deno.env.get(ai.key_secret || "BRAIN_AI_KEY") || "";
   const model = ai.model || "qwen3.5:9b";
   return { baseUrl, apiKey, model };
+}
+
+// surowy stream OpenAI-compatible (do testowego czatu)
+async function callProviderStream(ai: AiCfg, messages: unknown[]): Promise<Response | null> {
+  const { baseUrl, apiKey, model } = providerConfig(ai);
+  if (!baseUrl || !apiKey) return null;
+  try {
+    const r = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        think: false,
+        temperature: ai.temperature ?? 0.65,
+        max_tokens: ai.max_tokens ?? 700,
+        messages,
+      }),
+    });
+    return r.ok ? r : null;
+  } catch (e) {
+    console.error("provider stream network", String(e).slice(0, 200));
+    return null;
+  }
 }
 
 async function callProvider(ai: AiCfg, messages: unknown[]): Promise<string | null> {
@@ -275,6 +308,81 @@ function extractMarkers(raw: string): { text: string; won: boolean; lost: boolea
   const handoff = raw.includes("[PRZEKAZANIE]");
   const text = stripMd(raw.replaceAll("[WYGRANA]", "").replaceAll("[PRZEGRANA]", "").replaceAll("[PRZEKAZANIE]", "")).trim();
   return { text, won, lost, handoff };
+}
+
+// ── testowy czat / demo: SSE z filtrem markerów w locie ─────────────────────
+const MARKERS = ["[WYGRANA]", "[PRZEGRANA]", "[PRZEKAZANIE]"];
+
+// przytrzymaj sufiks, który może być początkiem markera (marker przecięty granicą chunka)
+function holdbackSplit(s: string): [string, string] {
+  for (let len = Math.min(s.length, 13); len > 0; len--) {
+    const suf = s.slice(-len);
+    if (MARKERS.some((m) => m.startsWith(suf))) return [s.slice(0, -len), suf];
+  }
+  return [s, ""];
+}
+
+function sseSalesChat(upstream: Response) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let full = "";
+  let carry = "";
+  let buf = "";
+  const clean = (s: string) => {
+    for (const m of MARKERS) s = s.replaceAll(m, "");
+    return s.replaceAll("**", "").replaceAll("__", "");
+  };
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = upstream.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split("\n\n");
+          buf = parts.pop() ?? "";
+          for (const part of parts) {
+            const line = part.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            const payload = line.slice(5).trim();
+            if (payload === "[DONE]") continue;
+            try {
+              const jd = JSON.parse(payload);
+              const piece = jd?.choices?.[0]?.delta?.content ?? "";
+              if (!piece) continue;
+              full += piece;
+              let visible = clean(carry + piece);
+              [visible, carry] = holdbackSplit(visible);
+              if (visible) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ d: visible })}\n\n`));
+            } catch {
+              /* niepełny chunk */
+            }
+          }
+        }
+        const tail = clean(carry);
+        if (tail) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ d: tail })}\n\n`));
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              done: true,
+              won: full.includes("[WYGRANA]"),
+              lost: full.includes("[PRZEGRANA]"),
+              handoff: full.includes("[PRZEKAZANIE]"),
+            })}\n\n`,
+          ),
+        );
+      } catch (e) {
+        console.error("sales chat stream", e);
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "stream" })}\n\n`));
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: { ...CORS, "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+  });
 }
 
 // historia korespondencji z leadem jako wymiana ról (out = assistant, in = user)
@@ -664,6 +772,52 @@ Deno.serve(async (req) => {
       if (!cronKey || body.cron_key !== cronKey) return J({ error: "forbidden" }, 403);
       const report = await tick();
       return J({ ok: true, report });
+    }
+
+    // testowy czat sprzedawcy (panel + publiczny link demo) — autoryzacja demo_key,
+    // rozmowa symulowana z wirtualnym leadem, NIC nie zapisuje się w bazie
+    if (action === "hello" || action === "chat") {
+      const dp = await projectByDemoKey(String(body.key ?? ""));
+      if (!dp) return J({ error: "invalid key" }, 401);
+      if (action === "hello") {
+        return J({ project: dp.name, persona: dp.cfg.persona || "AI Sprzedawca", temperature: dp.cfg.temperature || "zrównoważona" });
+      }
+      const channel = body.channel === "whatsapp" ? "whatsapp" : "email";
+      const history = (Array.isArray(body.messages) ? body.messages : [])
+        .slice(-16)
+        .filter((m: Record<string, unknown>) => (m.role === "user" || m.role === "assistant") && m.content)
+        .map((m: Record<string, unknown>) => ({ role: String(m.role), content: String(m.content).slice(0, 2500) }));
+      const virtualLead: Lead = {
+        id: "demo",
+        project_id: dp.projectId,
+        name: String(body.lead_name ?? "").slice(0, 80) || "Klient testowy",
+        email: "",
+        phone: "",
+        company: "",
+        temp: body.temp === "warm" ? "warm" : "cold",
+        status: "new",
+        channel,
+        notes: "",
+        meta: {},
+        attempts: history.filter((m: { role: string }) => m.role === "assistant").length,
+        last_in_at: null,
+      };
+      const ctx = await loadSalesContext(dp.projectId, dp.cfg);
+      const sys = buildSalesPrompt(ctx, dp.cfg, virtualLead, channel);
+      const msgs: { role: string; content: string }[] = [{ role: "system", content: sys }, ...history];
+      if (!history.length || history[history.length - 1].role !== "user") {
+        msgs.push({
+          role: "user",
+          content: `POLECENIE HANDLOWCA (wewnętrzne, nie klient): ${
+            virtualLead.attempts
+              ? `Klient nie odpowiedział. Napisz follow-up nr ${virtualLead.attempts + 1} — z nową wartością, nie "przypominajkę".`
+              : `Napisz pierwszą wiadomość sprzedażową (${channel === "email" ? "e-mail" : "WhatsApp"}) do tego leada.`
+          } Zwróć sam tekst wiadomości.`,
+        });
+      }
+      const upstream = await callProviderStream(ctx.ai, msgs);
+      if (!upstream) return J({ error: "AI niedostępne" }, 502);
+      return sseSalesChat(upstream);
     }
 
     // akcje panelu — autoryzacja hook_key projektu
