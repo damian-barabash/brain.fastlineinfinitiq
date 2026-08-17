@@ -73,6 +73,13 @@ async function assertProject(u: User, projectId: string) {
   if (!ws || !wsAllowed(u, ws)) throw new Error("forbidden");
 }
 
+// "3 200,50" / "3200.50" / 3200 → 3200.50; puste/nieparsowalne → null
+function parsePrice(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(String(v).replace(/\s+/g, "").replace(",", "."));
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+}
+
 function stripHtml(html: string): string {
   const NAMED: Record<string, string> = {
     nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'",
@@ -305,6 +312,9 @@ Deno.serve(async (req) => {
             buy_url: String(body.buy_url || ""),
             sales_name: String(body.sales_name || ""),
             sales_phone: String(body.sales_phone || ""),
+            price: parsePrice(body.price),
+            price_mode: body.price_mode === "brutto" ? "brutto" : "netto",
+            price_currency: String(body.price_currency || "PLN").toUpperCase().slice(0, 8),
           })
           .select()
           .single();
@@ -318,6 +328,11 @@ Deno.serve(async (req) => {
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
         for (const k of ["name", "description", "buy_url", "sales_name", "sales_phone", "sort"]) {
           if (body[k] !== undefined) patch[k] = body[k];
+        }
+        if (body.price !== undefined) patch.price = parsePrice(body.price);
+        if (body.price_mode !== undefined) patch.price_mode = body.price_mode === "brutto" ? "brutto" : "netto";
+        if (body.price_currency !== undefined) {
+          patch.price_currency = String(body.price_currency || "PLN").toUpperCase().slice(0, 8);
         }
         await db.from("brain_products").update(patch).eq("id", body.id as string);
         return J({ ok: true });

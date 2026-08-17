@@ -179,6 +179,13 @@ function KbCard({ it, onChanged, compact }) {
   )
 }
 
+const CURRENCIES = ['PLN', 'EUR', 'USD', 'GBP', 'CHF']
+
+function fmtPrice(p) {
+  if (p.price === null || p.price === undefined) return ''
+  return `${Number(p.price).toLocaleString('pl-PL', { maximumFractionDigits: 2 })} ${p.price_currency || 'PLN'} ${p.price_mode === 'brutto' ? 'brutto' : 'netto'}`
+}
+
 function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
   async function del() {
     if (!confirm(`Usunąć produkt „${p.name}" wraz z jego wiedzą?`)) return
@@ -203,6 +210,11 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
       </div>
       <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>{p.description || 'Brak opisu.'}</p>
       <div className="row" style={{ gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+        {p.price !== null && p.price !== undefined ? (
+          <span className="badge acid">{fmtPrice(p)}</span>
+        ) : (
+          <span className="badge warn">Brak ceny</span>
+        )}
         {p.buy_url ? <span className="badge acid">Link do zakupu</span> : <span className="badge danger">Brak linku do zakupu</span>}
         {p.sales_name || p.sales_phone ? (
           <span className="badge">Sprzedaż: {[p.sales_name, p.sales_phone].filter(Boolean).join(' • ')}</span>
@@ -324,12 +336,22 @@ function ProductModal({ projId, product, onClose, onDone }) {
     buy_url: product?.buy_url || '',
     sales_name: product?.sales_name || '',
     sales_phone: product?.sales_phone || '',
+    price: product?.price ?? '',
+    price_mode: product?.price_mode || 'netto',
+    price_currency: product?.price_currency || 'PLN',
   })
   const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }))
 
   async function save() {
     if (!f.name.trim()) return
+    const priceRaw = String(f.price).trim()
+    if (priceRaw && !Number.isFinite(Number(priceRaw.replace(/\s+/g, '').replace(',', '.')))) {
+      setErr('Cena musi być liczbą, np. 3200 albo 349,99.')
+      return
+    }
+    setErr('')
     setBusy(true)
     try {
       if (product) await api('product.update', { id: product.id, ...f })
@@ -349,13 +371,34 @@ function ProductModal({ projId, product, onClose, onDone }) {
           <input value={f.name} onChange={set('name')} />
         </label>
         <label className="f">
-          <span className="mono">Opis (co to jest, dla kogo, cena)</span>
+          <span className="mono">Opis (co to jest, dla kogo)</span>
           <textarea value={f.description} onChange={set('description')} />
         </label>
         <label className="f">
           <span className="mono">Link do zakupu</span>
           <input value={f.buy_url} onChange={set('buy_url')} placeholder="https://…" />
         </label>
+        <div className="grid" style={{ gridTemplateColumns: '1.2fr 1fr 1fr' }}>
+          <label className="f">
+            <span className="mono">Cena (puste = brak)</span>
+            <input value={f.price} onChange={set('price')} inputMode="decimal" placeholder="np. 3200 lub 349,99" />
+          </label>
+          <label className="f">
+            <span className="mono">Netto / brutto</span>
+            <select value={f.price_mode} onChange={set('price_mode')}>
+              <option value="netto">Netto</option>
+              <option value="brutto">Brutto</option>
+            </select>
+          </label>
+          <label className="f">
+            <span className="mono">Waluta</span>
+            <select value={f.price_currency} onChange={set('price_currency')}>
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </label>
+        </div>
         <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
           <label className="f">
             <span className="mono">Opiekun sprzedaży — imię</span>
@@ -366,6 +409,7 @@ function ProductModal({ projId, product, onClose, onDone }) {
             <input value={f.sales_phone} onChange={set('sales_phone')} placeholder="+48 …" />
           </label>
         </div>
+        {err && <p className="err">{err}</p>}
         <div className="acts">
           <button className="btn" onClick={onClose}>
             Anuluj
