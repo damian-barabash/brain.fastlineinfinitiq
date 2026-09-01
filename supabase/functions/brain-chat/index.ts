@@ -216,6 +216,23 @@ async function ensureConversation(
       .maybeSingle();
     if (data) return data.id;
   }
+  // Messenger/IG/WhatsApp nie mają conversation_id — bez tego każda wiadomość
+  // zakładała nową rozmowę i bot tracił pamięć. Wznawiamy otwartą rozmowę tego
+  // samego gościa na tym samym kanale, jeśli ostatnia aktywność była < 24 h temu.
+  if (visitorId && visitorId !== "anon") {
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const { data: prev } = await db
+      .from("brain_conversations")
+      .select("id")
+      .eq("project_id", projectId)
+      .eq("channel_id", channelId)
+      .eq("visitor_id", visitorId)
+      .eq("status", "open")
+      .gte("last_at", since)
+      .order("last_at", { ascending: false })
+      .limit(1);
+    if (prev?.[0]?.id) return prev[0].id as string;
+  }
   const { data } = await db
     .from("brain_conversations")
     .insert({ project_id: projectId, channel_id: channelId, channel_type: channelType, visitor_id: visitorId })
@@ -227,11 +244,15 @@ async function ensureConversation(
 type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string };
 
 function providerConfig(ai: AiCfg) {
-  let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").replace(/\/+$/, "");
+  let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
   if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
-  if (!baseUrl.endsWith("/v1")) baseUrl += "/v1";
-  const apiKey = Deno.env.get(ai.key_secret || "BRAIN_AI_KEY") || "";
-  const model = ai.model || "qwen3.5:9b";
+  if (baseUrl && !baseUrl.endsWith("/v1")) baseUrl += "/v1";
+  const secretName = (ai.key_secret || "BRAIN_AI_KEY").trim();
+  const apiKey = Deno.env.get(secretName) || "";
+  // diagnostyka: bez tego brak sekretu wygląda dokładnie jak padnięty dostawca
+  if (!baseUrl) console.error("AI config: brak base_url (panel i BARABASH_AI_URL puste)");
+  if (!apiKey) console.error("AI config: brak sekretu o nazwie", secretName);
+  const model = (ai.model || "").trim() || "qwen3.5:9b";
   return { baseUrl, apiKey, model };
 }
 
@@ -245,11 +266,12 @@ async function callProvider(ai: AiCfg, messages: unknown[], stream: boolean) {
       body: JSON.stringify({
         model,
         stream,
-        think: false,
         temperature: ai.temperature ?? 0.6,
         max_tokens: ai.max_tokens ?? 700,
         messages,
       }),
+      // bez limitu żądanie wisi aż do wall-clocku izolatu (150 s) — klient patrzy w pustkę
+      signal: AbortSignal.timeout(stream ? 120_000 : 90_000),
     });
   // sieciowe czknięcia (tls handshake eof na Funnelu itp.) — jeden retry zamiast crasha 500
   try {
@@ -313,8 +335,15 @@ function sseFromUpstream(
             }
           }
         }
-        const extra = await onFull(full);
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, ...extra })}\n\n`));
+        if (!full.trim()) {
+          // upstream urwał się po nagłówkach (429/500 w trakcie) — inaczej klient
+          // dostaje {done:true} i zostaje z pustym dymkiem na zawsze
+          console.error("provider: pusta odpowiedź strumieniowa");
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "empty" })}\n\n`));
+        } else {
+          const extra = await onFull(full);
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, ...extra })}\n\n`));
+        }
       } catch (e) {
         console.error("stream error", e);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "stream" })}\n\n`));
@@ -361,7 +390,10 @@ Deno.serve(async (req) => {
       project: ctx.project.name,
       greeting: ctx.advisor.greeting || `Cześć! Jestem ${ctx.advisor.persona || "asystentem"} ${ctx.project.name}. W czym mogę pomóc?`,
       persona: ctx.advisor.persona || "Asystent AI",
-      config: ctx.channel.config ?? {},
+      // tylko pola wyglądu widgetu — reszta configu to sekrety kanału (page_token, wa_token, verify_token)
+      config: (({ color, icon_color, win_bg, position, wa_phone, mode }) => ({ color, icon_color, win_bg, position, wa_phone, mode }))(
+        (ctx.channel.config ?? {}) as Record<string, unknown>,
+      ),
     });
   }
   if (body.action === "end") {
@@ -552,6 +584,10 @@ Deno.serve(async (req) => {
   if (!wantStream) {
     const data = await upstream.json();
     const raw = data?.choices?.[0]?.message?.content ?? "";
+    if (!String(raw).trim()) {
+      console.error("provider: pusta odpowiedź (non-stream), finish_reason:", data?.choices?.[0]?.finish_reason);
+      return J({ error: "empty" }, 502);
+    }
     const { clean, redirected, messageId } = await finish(raw);
     return J({ conversation_id: cid, reply: clean, redirected, message_id: messageId });
   }

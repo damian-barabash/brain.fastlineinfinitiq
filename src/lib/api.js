@@ -114,7 +114,8 @@ const READ_ACTIONS = new Set([
   'kb.list',
   'kb.fileUrl',
   'advisor.get',
-  'channels.list',
+  // channels.list i sales.get NIE są cache'owane: zawierają tokeny kanałów
+  // (page_token, wa_token, klucz Resend) — nie chcemy ich w localStorage.
   'settings.get',
   'stats',
   'conv.list',

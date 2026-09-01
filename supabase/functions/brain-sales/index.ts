@@ -23,7 +23,9 @@ const CORS: Record<string, string> = {
 const J = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 
-const TICK_BATCH = 5; // maks. wiadomości z autopilota na projekt na jeden tick
+const TICK_BATCH = 3; // maks. wiadomości z autopilota na projekt na jeden tick
+const TICK_TIME_BUDGET_MS = 100_000; // izolat żyje ~150 s — kończymy wcześniej, żeby zdążyć zapisać stany
+const INBOUND_REPLY_LIMIT_H = 3; // maks. automatycznych odpowiedzi na jednego leada w ciągu godziny (anty-pętla)
 
 // ── konfiguracja sprzedawcy ─────────────────────────────────────────────────
 type SalesCfg = {
@@ -53,6 +55,17 @@ type SalesCfg = {
     verify_token?: string;
     template_name?: string;
     template_lang?: string;
+    template_vars?: boolean; // szablon pierwszego kontaktu ma parametr {{1}} (domyślnie tak)
+  };
+  voice?: {
+    enabled?: boolean;
+    agent_id?: string; // agent ElevenLabs (jeden na projekt — zasada: 1 projekt = 1 agent + 1 numer)
+    phone_id?: string; // agent_phone_number_id z ElevenLabs (numer przypisany agentowi)
+    key_secret?: string; // nazwa sekretu Supabase z kluczem ElevenLabs (domyślnie ELEVENLABS_KEY)
+    webhook_secret?: string; // sekret post-call webhooka (podpis ElevenLabs-Signature)
+    first_message?: string; // pierwsze zdanie agenta przy połączeniu wychodzącym
+    send_link?: boolean; // po rozmowie wysłać link do zakupu (domyślnie tak)
+    max_per_day?: number; // limit połączeń na dobę (osobny od limitu wiadomości)
   };
   hook_key?: string;
 };
@@ -71,6 +84,8 @@ type Lead = {
   meta: Record<string, unknown>;
   attempts: number;
   last_in_at: string | null;
+  last_out_at?: string | null;
+  next_at?: string | null;
 };
 
 async function loadSales(projectId: string): Promise<SalesCfg | null> {
@@ -106,15 +121,24 @@ function inHours(cfg: SalesCfg, now = new Date()): boolean {
     .formatToParts(now);
   const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
   const wd = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[parts.find((p) => p.type === "weekday")?.value ?? "Mon"] ?? 1;
-  return days.includes(wd) && hour >= from && hour < to;
+  // okno może przechodzić przez północ (np. 22→6) — inaczej autopilot milczał na zawsze
+  const inWindow = from < to ? (hour >= from && hour < to) : (hour >= from || hour < to);
+  return days.includes(wd) && inWindow;
 }
 
 // początek bieżącej doby w strefie klienta (do dziennego limitu)
 function dayStartIso(cfg: SalesCfg): string {
   const tz = cfg.hours?.tz || "Europe/Warsaw";
-  const s = new Intl.DateTimeFormat("sv-SE", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-  // lokalna północ ≈ maks. 14h wstecz od UTC — wystarczające do limitu antyspamowego
-  return new Date(`${s}T00:00:00`).toISOString();
+  const now = new Date();
+  const s = new Intl.DateTimeFormat("sv-SE", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  // `new Date("...T00:00:00")` parsuje się w strefie procesu (w edge = UTC), więc doliczamy
+  // realne przesunięcie strefy klienta — inaczej doba limitu jest przesunięta o 1-2 h
+  const asUtc = new Date(`${s}T00:00:00Z`);
+  const probe = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" }).formatToParts(now);
+  const off = probe.find((x) => x.type === "timeZoneName")?.value ?? "GMT+00:00";
+  const m = off.match(/GMT([+-])(\d{2}):(\d{2})/);
+  const mins = m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+  return new Date(asUtc.getTime() - mins * 60_000).toISOString();
 }
 
 // ── provider AI (jak w brain-chat) ──────────────────────────────────────────
@@ -126,11 +150,14 @@ async function aiSettings(): Promise<AiCfg> {
 }
 
 function providerConfig(ai: AiCfg) {
-  let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").replace(/\/+$/, "");
+  let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
   if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
-  if (!baseUrl.endsWith("/v1")) baseUrl += "/v1";
-  const apiKey = Deno.env.get(ai.key_secret || "BRAIN_AI_KEY") || "";
-  const model = ai.model || "qwen3.5:9b";
+  if (baseUrl && !baseUrl.endsWith("/v1")) baseUrl += "/v1";
+  const secretName = (ai.key_secret || "BRAIN_AI_KEY").trim();
+  const apiKey = Deno.env.get(secretName) || "";
+  if (!baseUrl) console.error("AI config: brak base_url (panel i BARABASH_AI_URL puste)");
+  if (!apiKey) console.error("AI config: brak sekretu o nazwie", secretName);
+  const model = (ai.model || "").trim() || "qwen3.5:9b";
   return { baseUrl, apiKey, model };
 }
 
@@ -145,12 +172,13 @@ async function callProviderStream(ai: AiCfg, messages: unknown[]): Promise<Respo
       body: JSON.stringify({
         model,
         stream: true,
-        think: false,
         temperature: ai.temperature ?? 0.65,
         max_tokens: ai.max_tokens ?? 700,
         messages,
       }),
+      signal: AbortSignal.timeout(120_000),
     });
+    if (!r.ok) console.error("provider stream http", r.status, (await r.text().catch(() => "")).slice(0, 300));
     return r.ok ? r : null;
   } catch (e) {
     console.error("provider stream network", String(e).slice(0, 200));
@@ -168,21 +196,27 @@ async function callProvider(ai: AiCfg, messages: unknown[]): Promise<string | nu
       body: JSON.stringify({
         model,
         stream: false,
-        think: false,
         temperature: ai.temperature ?? 0.65,
         max_tokens: ai.max_tokens ?? 700,
         messages,
       }),
+      signal: AbortSignal.timeout(90_000),
     });
   try {
     let r = await doFetch();
     if (!r.ok) {
       console.error("provider http", r.status, (await r.text()).slice(0, 200));
-      await new Promise((res) => setTimeout(res, 700));
+      // powtarzamy tylko to, co ma sens: przeciążenie i błędy serwera.
+      // 400/401 (zły model, zły klucz) powtórzone niczego nie naprawi, a 429 pogłębia limit
+      if (r.status !== 429 && r.status < 500) return null;
+      await new Promise((res) => setTimeout(res, 1500));
       r = await doFetch();
       if (!r.ok) return null;
     }
     const data = await r.json();
+    if (data?.choices?.[0]?.finish_reason === "length") {
+      console.error("provider: odpowiedź ucięta limitem max_tokens — podnieś limit w panelu");
+    }
     return data?.choices?.[0]?.message?.content ?? null;
   } catch (e) {
     console.error("provider network", String(e).slice(0, 200));
@@ -288,13 +322,16 @@ function buildSalesPrompt(
 }
 
 function parseEmailDraft(raw: string): { subject: string; body: string } {
-  const m = raw.match(/^\s*TEMAT:\s*(.+)\r?\n+([\s\S]*)$/);
-  if (m) return { subject: m[1].trim(), body: m[2].trim() };
-  return { subject: "", body: raw.trim() };
+  // szukamy tematu w dowolnym miejscu początku odpowiedzi i ZAWSZE usuwamy tę linię z treści,
+  // żeby służbowe "TEMAT: ..." nigdy nie poszło w mailu do klienta
+  const m = raw.match(/(?:^|\n)[ \t]*TEMAT:[ \t]*(.+)/i);
+  const body = raw.replace(/(?:^|\n)[ \t]*TEMAT:[ \t]*.+\r?\n?/i, "\n").trim();
+  return { subject: m ? m[1].trim() : "", body };
 }
 
 function stripMd(text: string): string {
   return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replaceAll("**", "")
     .replaceAll("__", "")
     .replace(/```[a-z]*\n?/g, "")
@@ -302,12 +339,13 @@ function stripMd(text: string): string {
     .replace(/`([^`]+)`/g, "$1");
 }
 
+// model bywa niekonsekwentny: [Wygrana], [ WYGRANA ], **[WYGRANA]**. Dopasowanie ścisłe
+// oznaczało, że znacznik trafiał do treści e-maila do klienta i nie zmieniał statusu.
+const MARKER_RE = /\[\s*(WYGRANA|PRZEGRANA|PRZEKAZANIE)\s*\]/gi;
 function extractMarkers(raw: string): { text: string; won: boolean; lost: boolean; handoff: boolean } {
-  const won = raw.includes("[WYGRANA]");
-  const lost = raw.includes("[PRZEGRANA]");
-  const handoff = raw.includes("[PRZEKAZANIE]");
-  const text = stripMd(raw.replaceAll("[WYGRANA]", "").replaceAll("[PRZEGRANA]", "").replaceAll("[PRZEKAZANIE]", "")).trim();
-  return { text, won, lost, handoff };
+  const found = [...String(raw).matchAll(MARKER_RE)].map((m) => m[1].toUpperCase());
+  const text = stripMd(String(raw).replace(MARKER_RE, "")).trim();
+  return { text, won: found.includes("WYGRANA"), lost: found.includes("PRZEGRANA"), handoff: found.includes("PRZEKAZANIE") };
 }
 
 // ── testowy czat / demo: SSE z filtrem markerów w locie ─────────────────────
@@ -330,7 +368,8 @@ function sseSalesChat(upstream: Response) {
   let buf = "";
   const clean = (s: string) => {
     for (const m of MARKERS) s = s.replaceAll(m, "");
-    return s.replaceAll("**", "").replaceAll("__", "");
+    // „TEMAT:" to znacznik służbowy formatu e-mail — w demo pokazujemy go jako zwykły temat
+    return s.replaceAll("**", "").replaceAll("__", "").replace(/\bTEMAT:/g, "Temat:");
   };
   const stream = new ReadableStream({
     async start(controller) {
@@ -366,9 +405,9 @@ function sseSalesChat(upstream: Response) {
           encoder.encode(
             `data: ${JSON.stringify({
               done: true,
-              won: full.includes("[WYGRANA]"),
-              lost: full.includes("[PRZEGRANA]"),
-              handoff: full.includes("[PRZEKAZANIE]"),
+              won: /\[\s*WYGRANA\s*\]/i.test(full),
+              lost: /\[\s*PRZEGRANA\s*\]/i.test(full),
+              handoff: /\[\s*PRZEKAZANIE\s*\]/i.test(full),
             })}\n\n`,
           ),
         );
@@ -400,52 +439,66 @@ async function leadHistory(leadId: string, limit = 14) {
 const OPTOUT_FOOTER =
   "\n\n—\nOtrzymujesz tę wiadomość, bo Twoje dane trafiły do nas jako kontakt biznesowy. Odpisz STOP, aby nie dostawać kolejnych wiadomości.";
 
-async function sendEmail(cfg: SalesCfg, to: string, subject: string, body: string) {
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+
+async function sendEmail(cfg: SalesCfg, to: string, subject: string, body: string, idemKey?: string) {
   const e = cfg.email ?? {};
   if (!e.resend_key || !e.from_email) return { ok: false, error: "brak konfiguracji e-mail (klucz Resend / adres nadawcy)" };
-  const text = body + (e.footer_optout !== false ? OPTOUT_FOOTER : "");
+  if (!EMAIL_RE.test(String(to).trim())) return { ok: false, error: `niepoprawny adres odbiorcy: ${to}` };
+  if (!EMAIL_RE.test(String(e.from_email).trim())) return { ok: false, error: "niepoprawny adres nadawcy w ustawieniach" };
+  // podpis dopisujemy w kodzie: w prompcie model pomijał go w części wiadomości
+  const sig = (e.signature || "").trim();
+  const withSig = sig && !body.includes(sig) ? `${body}\n\n${sig}` : body;
+  const text = withSig + (e.footer_optout !== false ? OPTOUT_FOOTER : "");
+  const finalSubject = subject || "Wiadomość od " + (e.from_name || e.from_email);
   const payload: Record<string, unknown> = {
     from: e.from_name ? `${e.from_name} <${e.from_email}>` : e.from_email,
     to: [to],
-    subject: subject || "Wiadomość od " + (e.from_name || e.from_email),
+    subject: finalSubject,
     text,
   };
   if (e.reply_to) payload.reply_to = [e.reply_to];
   try {
+    const headers: Record<string, string> = { Authorization: `Bearer ${e.resend_key}`, "Content-Type": "application/json" };
+    // gdyby izolat padł po wysyłce, a przed zapisem statusu — Resend nie wyśle drugi raz
+    if (idemKey) headers["Idempotency-Key"] = idemKey;
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      headers: { Authorization: `Bearer ${e.resend_key}`, "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, error: `Resend ${r.status}: ${JSON.stringify(data).slice(0, 200)}` };
-    return { ok: true, id: data?.id };
+    return { ok: true, id: data?.id, subject: finalSubject };
   } catch (err) {
     return { ok: false, error: String(err).slice(0, 200) };
   }
 }
 
-async function sendWhatsApp(cfg: SalesCfg, phone: string, body: string | null, useTemplate: boolean) {
+async function sendWhatsApp(cfg: SalesCfg, phone: string, body: string | null, useTemplate: boolean, templateVar?: string) {
   const w = cfg.whatsapp ?? {};
   if (!w.phone_number_id || !w.wa_token) return { ok: false, error: "brak konfiguracji WhatsApp" };
   const to = phone.replace(/[^\d]/g, "");
+  if (to.length < 8) return { ok: false, error: `niepoprawny numer odbiorcy: ${phone}` };
   let payload: Record<string, unknown>;
   if (useTemplate) {
     if (!w.template_name) return { ok: false, error: "brak szablonu WhatsApp (pierwszy kontakt wymaga zatwierdzonego szablonu Meta)" };
-    payload = {
-      messaging_product: "whatsapp",
-      to,
-      type: "template",
-      template: { name: w.template_name, language: { code: w.template_lang || "pl" } },
-    };
+    const tpl: Record<string, unknown> = { name: w.template_name, language: { code: w.template_lang || "pl" } };
+    // szablony pierwszego kontaktu są zwykle parametryzowane ({{1}} = imię) — bez components Meta zwraca 132000
+    if (w.template_vars !== false) {
+      tpl.components = [{ type: "body", parameters: [{ type: "text", text: (templateVar || "Dzień dobry").slice(0, 60) }] }];
+    }
+    payload = { messaging_product: "whatsapp", to, type: "template", template: tpl };
   } else {
     payload = { messaging_product: "whatsapp", to, type: "text", text: { body: body ?? "" } };
   }
   try {
-    const r = await fetch(`https://graph.facebook.com/v21.0/${w.phone_number_id}/messages`, {
+    const r = await fetch(`https://graph.facebook.com/v23.0/${w.phone_number_id}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${w.wa_token}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(25_000),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, error: `Graph ${r.status}: ${JSON.stringify(data).slice(0, 200)}` };
@@ -485,6 +538,36 @@ async function draftForLead(projectId: string, cfg: SalesCfg, lead: Lead, channe
 }
 
 async function sendToLead(projectId: string, cfg: SalesCfg, lead: Lead, opts: { auto: boolean }) {
+  // kanał telefoniczny: zamiast pisać — dzwonimy (rozmowę prowadzi agent ElevenLabs)
+  const voiceOn = cfg.voice?.enabled && !voiceNotReady(cfg);
+  if (lead.channel === "phone" || (voiceOn && !lead.email && lead.phone && !cfg.channels?.whatsapp)) {
+    if (!lead.phone) return { ok: false, error: "lead bez numeru telefonu" };
+    if (!cfg.voice?.enabled) return { ok: false, error: "kanał telefoniczny wyłączony" };
+    const why = voiceNotReady(cfg);
+    if (why) return { ok: false, error: why };
+    const { data: pr } = await db.from("brain_projects").select("name").eq("id", projectId).maybeSingle();
+    const res = await startCall(projectId, cfg, lead, pr?.name ?? "");
+    await db.from("brain_lead_messages").insert({
+      lead_id: lead.id, project_id: projectId, channel: "phone", direction: "out",
+      subject: "Połączenie wychodzące", content: res.ok ? "(rozmowa rozpoczęta — transkrypcja po zakończeniu)" : "",
+      status: res.ok ? "sent" : "failed",
+      meta: { auto: opts.auto, call: true, conversation_id: (res as { id?: string }).id ?? null, error: res.ok ? null : res.error },
+    });
+    const followupDays = cfg.followup_days ?? 3;
+    const maxF = cfg.max_followups ?? 3;
+    const attempts = lead.attempts + 1;
+    await db.from("brain_leads").update({
+      status: res.ok ? (lead.status === "new" ? "contacted" : lead.status) : lead.status,
+      attempts,
+      last_out_at: res.ok ? new Date().toISOString() : lead.last_out_at,
+      // wynik rozmowy dojdzie webhookiem; gdyby nie doszedł — ponowienie za followup_days
+      next_at: attempts < maxF ? new Date(Date.now() + followupDays * 864e5).toISOString() : null,
+      updated_at: new Date().toISOString(),
+      meta: res.ok ? lead.meta : { ...(lead.meta ?? {}), last_error: String(res.error ?? "").slice(0, 300) },
+    }).eq("id", lead.id);
+    return res;
+  }
+
   const channel: "email" | "whatsapp" = lead.channel === "whatsapp" || (!lead.email && lead.phone) ? "whatsapp" : "email";
   if (channel === "email" && !lead.email) return { ok: false, error: "lead bez adresu e-mail" };
   if (channel === "whatsapp" && !lead.phone) return { ok: false, error: "lead bez numeru telefonu" };
@@ -508,24 +591,25 @@ async function sendToLead(projectId: string, cfg: SalesCfg, lead: Lead, opts: { 
   }
 
   const res = channel === "email"
-    ? await sendEmail(cfg, lead.email, subject, body)
-    : await sendWhatsApp(cfg, lead.phone, body, waTemplate);
+    ? await sendEmail(cfg, lead.email, subject, body, `${lead.id}:${lead.attempts}`)
+    : await sendWhatsApp(cfg, lead.phone, body, waTemplate, lead.name || undefined);
 
+  const sentSubject = (res as { subject?: string }).subject || subject;
   await db.from("brain_lead_messages").insert({
     lead_id: lead.id,
     project_id: projectId,
     channel,
     direction: "out",
-    subject,
+    subject: sentSubject,
     content: body,
     status: res.ok ? "sent" : "failed",
     meta: { auto: opts.auto, provider_id: (res as { id?: string }).id ?? null, error: res.ok ? null : res.error, template: waTemplate || undefined },
   });
 
+  const followupDays = cfg.followup_days ?? 3;
+  const maxF = cfg.max_followups ?? 3;
+  const attempts = lead.attempts + 1;
   if (res.ok) {
-    const followupDays = cfg.followup_days ?? 3;
-    const maxF = cfg.max_followups ?? 3;
-    const attempts = lead.attempts + 1;
     await db
       .from("brain_leads")
       .update({
@@ -536,12 +620,50 @@ async function sendToLead(projectId: string, cfg: SalesCfg, lead: Lead, opts: { 
         updated_at: new Date().toISOString(),
       })
       .eq("id", lead.id);
+  } else {
+    // KRYTYCZNE: bez tego lead z błędem (zła domena, brak kanału) wracał do kolejki co 10 minut,
+    // blokował miejsca w batchu i wypalał dzienny limit — prawdziwi lidzi nie dostawali nic.
+    const cfgError = /brak konfiguracji|wyłączony|niepoprawny adres|niepoprawny numer|brak szablonu|lead bez/i.test(String(res.error ?? ""));
+    await db
+      .from("brain_leads")
+      .update({
+        attempts,
+        next_at: cfgError || attempts >= maxF ? null : new Date(Date.now() + followupDays * 864e5).toISOString(),
+        status: cfgError ? "paused" : lead.status,
+        updated_at: new Date().toISOString(),
+        meta: { ...(lead.meta ?? {}), last_error: String(res.error ?? "").slice(0, 300), last_error_at: new Date().toISOString() },
+      })
+      .eq("id", lead.id);
   }
   return res;
 }
 
 // ── odpowiedź AI na wiadomość przychodzącą (e-mail / WhatsApp) ──────────────
-const STOP_RE = /^\s*stop\b|\bwypisz|\bnie pisz|\bunsubscribe\b|\busuń mnie\b/i;
+const STOP_RE = /(^|\n)\s*stop\b|\bwypisz mnie\b|\bproszę nie pisać\b|\bunsubscribe\b|\busuń mnie\b/i;
+
+// odcinamy cytowaną historię — inaczej nasza własna stopka „Odpisz STOP" w cytacie
+// wypisywała leada przy każdej odpowiedzi, a cały wątek szedł do modelu po raz drugi
+function freshPart(text: string): string {
+  const cut = text.search(/(^|\n)\s*(>|On .{0,80}wrote:|Dnia .{0,80}napisał|W dniu .{0,80}napisał|-----\s*Original Message|Od:\s|From:\s|—\nOtrzymujesz tę wiadomość)/i);
+  return (cut > 40 ? text.slice(0, cut) : text).trim();
+}
+
+// nadawcy, którym nie wolno odpowiadać: bounce'y i autorespondery robią pętlę bez końca
+const ROBOT_FROM = /^(mailer-daemon|postmaster|noreply|no-reply|do-not-reply|donotreply|bounce|bounces|notification|notifications|automat)@/i;
+function isAutoMail(data: Record<string, unknown>, from: string): string | null {
+  if (ROBOT_FROM.test(from)) return "adres systemowy";
+  const h = data.headers;
+  const flat: Record<string, string> = {};
+  if (Array.isArray(h)) for (const x of h as Record<string, string>[]) flat[String(x.name ?? "").toLowerCase()] = String(x.value ?? "");
+  else if (h && typeof h === "object") for (const [k, v] of Object.entries(h as Record<string, unknown>)) flat[k.toLowerCase()] = String(v);
+  const auto = (flat["auto-submitted"] ?? "").toLowerCase();
+  if (auto && auto !== "no") return "auto-submitted";
+  if (flat["x-autoreply"] || flat["x-autorespond"] || flat["x-auto-response-suppress"]) return "autoresponder";
+  const prec = (flat["precedence"] ?? "").toLowerCase();
+  if (["bulk", "list", "junk", "auto_reply"].includes(prec)) return `precedence: ${prec}`;
+  if ((flat["return-path"] ?? "").trim() === "<>") return "bounce (pusty return-path)";
+  return null;
+}
 const TERMINAL = new Set(["won", "lost", "opt_out", "paused", "handoff"]);
 
 async function handleInbound(
@@ -566,13 +688,30 @@ async function handleInbound(
     updated_at: new Date().toISOString(),
   };
 
-  if (STOP_RE.test(inbound.text)) {
+  if (STOP_RE.test(freshPart(inbound.text))) {
     await db.from("brain_leads").update({ ...patch, status: "opt_out", next_at: null }).eq("id", lead.id);
     return { replied: false, reason: "opt_out" };
   }
   if (TERMINAL.has(lead.status)) {
     await db.from("brain_leads").update(patch).eq("id", lead.id);
     return { replied: false, reason: "closed" };
+  }
+
+  // anty-pętla: autoresponder po drugiej stronie potrafi odbijać w nieskończoność,
+  // a każdy obieg to wywołanie modelu i realna wiadomość
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const { count: repliesLastHour } = await db
+    .from("brain_lead_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("lead_id", lead.id)
+    .eq("direction", "out")
+    .eq("meta->>reply", "true")
+    .gte("created_at", hourAgo);
+  if ((repliesLastHour ?? 0) >= INBOUND_REPLY_LIMIT_H) {
+    console.error("inbound: limit automatycznych odpowiedzi dla leada", lead.id);
+    await db.from("brain_leads").update({ ...patch, unread: true }).eq("id", lead.id);
+    await db.from("brain_events").insert({ project_id: projectId, type: "inbound_rate_limit", data: { lead_id: lead.id } });
+    return { replied: false, reason: "limit odpowiedzi/h" };
   }
 
   // wygenerowanie odpowiedzi z pełną historią + nową wiadomością klienta
@@ -625,6 +764,7 @@ async function handleInbound(
 
 // ── autopilot ───────────────────────────────────────────────────────────────
 async function tick() {
+  const t0 = Date.now();
   const { data: rows } = await db.from("brain_sales").select("project_id, config");
   const report: Record<string, unknown>[] = [];
   for (const row of rows ?? []) {
@@ -640,6 +780,7 @@ async function tick() {
       .select("id", { count: "exact", head: true })
       .eq("project_id", row.project_id)
       .eq("direction", "out")
+      .eq("status", "sent") // nieudane próby nie mogą wypalać dziennego limitu
       .eq("meta->>auto", "true")
       .gte("created_at", dayStartIso(cfg));
     const budget = Math.min(TICK_BATCH, Math.max(0, limit - (sentToday ?? 0)));
@@ -661,11 +802,35 @@ async function tick() {
     let sent = 0;
     const errors: string[] = [];
     for (const lead of leads ?? []) {
-      const res = await sendToLead(row.project_id, cfg, lead as Lead, { auto: true });
-      if (res.ok) sent++;
-      else errors.push(`${(lead as Lead).name || (lead as Lead).email}: ${res.error}`);
+      if (Date.now() - t0 > TICK_TIME_BUDGET_MS) {
+        errors.push("przerwano: budżet czasu izolatu");
+        break;
+      }
+      // REZERWACJA przed generacją: generacja + wysyłka trwają dziesiątki sekund,
+      // a tick chodzi co 10 minut — bez tego dwa ticki mogły wysłać to samo dwa razy.
+      const { data: claimed } = await db
+        .from("brain_leads")
+        .update({ next_at: new Date(Date.now() + 3600_000).toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", (lead as Lead).id)
+        .or(`next_at.is.null,next_at.lte.${nowIso}`)
+        .select("id");
+      if (!claimed?.length) continue; // inny tick już go zabrał
+      try {
+        const res = await sendToLead(row.project_id, cfg, lead as Lead, { auto: true });
+        if (res.ok) sent++;
+        else errors.push(`${(lead as Lead).name || (lead as Lead).email}: ${res.error}`);
+      } catch (e) {
+        // wyjątek na jednym leadzie nie może zabić tick-a dla pozostałych projektów
+        console.error("tick lead error", (lead as Lead).id, String(e).slice(0, 200));
+        errors.push(`${(lead as Lead).name || (lead as Lead).email}: ${String(e).slice(0, 120)}`);
+      }
     }
-    report.push({ project: row.project_id, sent, errors: errors.slice(0, 3) });
+    const summary = { project: row.project_id, sent, errors: errors.slice(0, 3) };
+    report.push(summary);
+    // ostatni raport widoczny w panelu — pg_cron wyrzuca ciało odpowiedzi do kosza
+    await db.from("brain_sales").update({
+      config: { ...(row.config as SalesCfg), _last_tick: { at: new Date().toISOString(), ...summary } },
+    }).eq("project_id", row.project_id);
   }
   return report;
 }
@@ -675,6 +840,20 @@ function emailAddr(raw: string): string {
   const m = String(raw ?? "").match(/<([^>]+)>/);
   return (m ? m[1] : String(raw ?? "")).trim().toLowerCase();
 }
+function stripHtmlBasic(html: string): string {
+  return html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)));
+}
+
 function emailName(raw: string): string {
   const m = String(raw ?? "").match(/^\s*"?([^"<]+?)"?\s*</);
   return m ? m[1].trim() : "";
@@ -684,19 +863,41 @@ async function inboundEmail(projectId: string, cfg: SalesCfg, payload: Record<st
   const data = (payload?.data ?? payload) as Record<string, unknown>;
   const fromRaw = String(data.from ?? "");
   const from = emailAddr(fromRaw);
-  if (!from || from === (cfg.email?.from_email ?? "").toLowerCase()) return { ok: false, reason: "brak nadawcy" };
+  const own = [cfg.email?.from_email, cfg.email?.reply_to].map((x) => String(x ?? "").toLowerCase()).filter(Boolean);
+  if (!from || own.includes(from)) return { ok: false, reason: "brak nadawcy / własny adres" };
+  const robot = isAutoMail(data, from);
+  if (robot) {
+    // bounce albo „jestem na urlopie" — odpowiadanie na to nakręca pętlę z ciągłym kosztem modelu
+    console.log("inbound: pomijam wiadomość automatyczną —", robot, from);
+    await db.from("brain_events").insert({ project_id: projectId, type: "inbound_auto_skipped", data: { from, robot } });
+    return { ok: false, reason: `wiadomość automatyczna (${robot})` };
+  }
   const subject = String(data.subject ?? "");
-  const text = String(data.text ?? data.html ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const rawText = String(data.text || "") || stripHtmlBasic(String(data.html || ""));
+  const text = freshPart(rawText.replace(/\r/g, "")).replace(/[ \t]+/g, " ").trim().slice(0, 6000);
   if (!text) return { ok: false, reason: "pusta treść" };
 
-  let { data: lead } = await db.from("brain_leads").select("*").eq("project_id", projectId).ilike("email", from).maybeSingle();
+  // eq zamiast ilike (adres to wzorzec LIKE — „%@x.pl" pasowałby do wszystkich)
+  // i limit(1) zamiast maybeSingle (dwa lidy z tym samym adresem = błąd i trzeci duplikat)
+  const { data: found } = await db
+    .from("brain_leads")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("email", from)
+    .order("created_at")
+    .limit(1);
+  let lead = found?.[0] ?? null;
   if (!lead) {
     // nieznany nadawca odpisał na nasz adres — zakładamy leada (ciepły, źródło inbound)
-    const { data: created } = await db
+    const { data: created, error } = await db
       .from("brain_leads")
       .insert({ project_id: projectId, name: emailName(fromRaw), email: from, temp: "warm", status: "replied", channel: "email", meta: { source: "inbound" } })
       .select("*")
       .single();
+    if (error || !created) {
+      console.error("inbound: nie udało się założyć leada", error?.message);
+      return { ok: false, reason: "nie udało się zapisać leada" };
+    }
     lead = created;
   }
   return await handleInbound(projectId, cfg, lead as Lead, "email", { subject, text });
@@ -715,14 +916,313 @@ async function inboundWa(projectId: string, cfg: SalesCfg, payload: Record<strin
         const fromPhone = String(msg.from ?? "").replace(/[^\d]/g, "");
         const text = String((msg.text as Record<string, unknown>)?.body ?? "").trim();
         if (!fromPhone || !text) continue;
-        const { data: leads } = await db.from("brain_leads").select("*").eq("project_id", projectId).neq("phone", "");
-        const lead = (leads ?? []).find((l) => String(l.phone).replace(/[^\d]/g, "").endsWith(fromPhone.slice(-9)));
-        if (!lead) continue; // WA tylko dla lidów z tabeli — obcy numer ignorujemy
-        results.push(await handleInbound(projectId, cfg, lead as Lead, "whatsapp", { subject: "", text }));
+        // Meta dostarcza at-least-once — bez tego powtórka webhooka = druga odpowiedź klientowi
+        if (await alreadySeen(projectId, `wa:${String(msg.id ?? "")}`)) continue;
+        const { data: leads } = await db
+          .from("brain_leads")
+          .select("*")
+          .eq("project_id", projectId)
+          .neq("phone", "")
+          .limit(2000);
+        // porównanie pełnych numerów (końcówka 9 cyfr myliła +48 z +49)
+        const cands = (leads ?? []).filter((l) => {
+          const d = String(l.phone).replace(/[^\d]/g, "");
+          return d === fromPhone || d.replace(/^0+/, "") === fromPhone.replace(/^48/, "") || fromPhone.endsWith(d) && d.length >= 9;
+        });
+        if (cands.length !== 1) {
+          console.error("wa: brak jednoznacznego leada dla numeru", fromPhone, "kandydatów:", cands.length);
+          continue; // obcy numer albo kolizja — nie odpisujemy nie tej osobie
+        }
+        results.push(await handleInbound(projectId, cfg, cands[0] as Lead, "whatsapp", { subject: "", text }));
       }
     }
   }
   return results;
+}
+
+
+// Webhooki (Meta, ElevenLabs, Svix) dostarczane są at-least-once. Unikalny indeks
+// na brain_events(type='hook_msg', data->>'mid') zamienia powtórkę w błąd 23505.
+async function alreadySeen(projectId: string, mid: string): Promise<boolean> {
+  if (!mid || mid.endsWith(":")) return false;
+  const { error } = await db.from("brain_events").insert({ project_id: projectId, type: "hook_msg", data: { mid } });
+  if (!error) return false;
+  if (error.code === "23505") {
+    console.log("duplikat webhooka:", mid);
+    return true;
+  }
+  console.error("alreadySeen insert", error.message);
+  return false; // problem z zapisem nie może blokować obsługi klienta
+}
+
+// ── kanał telefoniczny: ElevenLabs Conversational AI ────────────────────────
+// Zasada z ustaleń: 1 projekt = 1 agent ElevenLabs + 1 numer. Konfiguracja per projekt
+// w brain_sales.config.voice, klucz API w sekrecie Supabase (nigdy w bazie).
+// Rozmowy wychodzące startuje autopilot/panel, przychodzące odbiera agent po stronie
+// ElevenLabs — do nas obie wracają tym samym webhookiem po zakończeniu rozmowy.
+const ELEVEN = "https://api.elevenlabs.io/v1";
+
+function elevenKey(cfg: SalesCfg): string {
+  return Deno.env.get((cfg.voice?.key_secret || "ELEVENLABS_KEY").trim()) || "";
+}
+
+// czytelny powód, dlaczego kanał telefoniczny nie jest gotowy (pokazywany w panelu)
+function voiceNotReady(cfg: SalesCfg): string | null {
+  const v = cfg.voice ?? {};
+  if (!v.agent_id) return "brak ID agenta ElevenLabs";
+  if (!v.phone_id) return "brak numeru telefonu agenta (phone_id)";
+  if (!elevenKey(cfg)) return `brak sekretu ${v.key_secret || "ELEVENLABS_KEY"} w Supabase`;
+  return null;
+}
+
+function transcriptToText(data: Record<string, unknown>): string {
+  const turns = (data?.transcript ?? []) as Record<string, unknown>[];
+  return turns
+    .map((t) => `${String(t.role ?? "") === "agent" ? "Agent" : "Klient"}: ${String(t.message ?? "").trim()}`)
+    .filter((l) => l.length > 8)
+    .join("\n")
+    .slice(0, 8000);
+}
+
+// Prompt agenta głosowego = ta sama baza wiedzy co e-mail/WhatsApp, ale zasady rozmowy
+// telefonicznej: krótkie zdania, bez linków i bez markdownu (agent to czyta na głos).
+async function buildVoicePrompt(projectId: string, cfg: SalesCfg, projectName: string): Promise<string> {
+  const ctx = await loadSalesContext(projectId, cfg);
+  const base = buildSalesPrompt(ctx, cfg, {
+    id: "", project_id: projectId, name: "", email: "", phone: "", company: "",
+    temp: "cold", status: "new", channel: "phone", notes: "", attempts: 0,
+    meta: {}, last_in_at: null, last_out_at: null, next_at: null,
+  } as unknown as Lead, "whatsapp");
+  return [
+    base,
+    "",
+    "=== ROZMOWA TELEFONICZNA ===",
+    `Rozmawiasz przez telefon w imieniu firmy ${projectName}. Mówisz po polsku, naturalnie i krótko —`,
+    "maksymalnie 2 zdania na wypowiedź, bez wyliczanek, bez markdownu, bez czytania linków na głos.",
+    "Kwoty wymawiaj słowami. Jeśli klient prosi o link, ofertę albo cennik — powiedz, że wyślesz to",
+    "e-mailem/SMS-em zaraz po rozmowie, i potwierdź adres lub numer.",
+    "Nie przerywaj klientowi. Gdy prosi o człowieka albo chce negocjować — obiecaj kontakt opiekuna",
+    "i zakończ rozmowę uprzejmie. Jeśli trafiłeś na pocztę głosową, nie zostawiaj długiej wiadomości:",
+    "przedstaw się jednym zdaniem i zapowiedz kontakt.",
+  ].join("\n");
+}
+
+// wypchnięcie promptu i pierwszej wiadomości do agenta (po każdej zmianie bazy wiedzy)
+async function syncVoiceAgent(projectId: string, cfg: SalesCfg, projectName: string) {
+  const why = voiceNotReady(cfg);
+  if (why) return { ok: false, error: why };
+  const prompt = await buildVoicePrompt(projectId, cfg, projectName);
+  const conversation_config: Record<string, unknown> = {
+    agent: {
+      prompt: { prompt },
+      first_message: cfg.voice?.first_message ||
+        `Dzień dobry, z tej strony ${cfg.persona || "asystent"} z ${projectName}. Czy mam chwilę, żeby powiedzieć, z czym dzwonię?`,
+      language: (cfg.language || "pl").slice(0, 2),
+    },
+  };
+  try {
+    const r = await fetch(`${ELEVEN}/convai/agents/${cfg.voice!.agent_id}`, {
+      method: "PATCH",
+      headers: { "xi-api-key": elevenKey(cfg), "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_config }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!r.ok) return { ok: false, error: `ElevenLabs ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}` };
+    return { ok: true, chars: prompt.length };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 200) };
+  }
+}
+
+// połączenie wychodzące do leada
+async function startCall(projectId: string, cfg: SalesCfg, lead: Lead, projectName: string) {
+  const why = voiceNotReady(cfg);
+  if (why) return { ok: false, error: why };
+  const to = String(lead.phone || "").replace(/[^\d+]/g, "");
+  if (to.replace(/\D/g, "").length < 8) return { ok: false, error: `niepoprawny numer: ${lead.phone}` };
+  try {
+    const r = await fetch(`${ELEVEN}/convai/twilio/outbound-call`, {
+      method: "POST",
+      headers: { "xi-api-key": elevenKey(cfg), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_id: cfg.voice!.agent_id,
+        agent_phone_number_id: cfg.voice!.phone_id,
+        to_number: to.startsWith("+") ? to : `+${to}`,
+        conversation_initiation_client_data: {
+          dynamic_variables: {
+            lead_id: lead.id,
+            project_id: projectId,
+            lead_name: lead.name || "",
+            lead_company: lead.company || "",
+            lead_notes: (lead.notes || "").slice(0, 400),
+            project_name: projectName,
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, error: `ElevenLabs ${r.status}: ${JSON.stringify(data).slice(0, 200)}` };
+    return { ok: true, id: data?.conversation_id ?? data?.callSid ?? null };
+  } catch (e) {
+    return { ok: false, error: String(e).slice(0, 200) };
+  }
+}
+
+// po rozmowie: podsumowanie i decyzja modelu — co dalej i który produkt wysłać
+async function analyzeCall(projectId: string, cfg: SalesCfg, lead: Lead, transcript: string) {
+  const ctx = await loadSalesContext(projectId, cfg);
+  const products = ctx.products.map((p) => `${p.name}${p.buy_url ? ` (link: ${p.buy_url})` : " (bez linku)"}`).join("; ");
+  const sys =
+    "Jesteś analitykiem sprzedaży. Na podstawie transkrypcji rozmowy telefonicznej zwróć TYLKO JSON, bez komentarza.";
+  const user = [
+    `PRODUKTY: ${products || "brak"}`,
+    "",
+    "TRANSKRYPCJA:",
+    transcript,
+    "",
+    'Zwróć JSON: {"outcome":"won|interested|followup|lost|handoff","product":"dokładna nazwa produktu z listy albo pusty string",',
+    '"summary":"1-2 zdania po polsku, co ustalono","message":"krótka wiadomość do klienta po rozmowie (2-4 zdania, po polsku, bez markdownu)"}',
+    'outcome=won gdy klient potwierdził zakup; interested gdy prosi o link/ofertę; followup gdy trzeba oddzwonić;',
+    "lost gdy odmówił; handoff gdy prosi o człowieka lub negocjacje.",
+  ].join("\n");
+  const raw = await callProvider(ctx.ai, [{ role: "system", content: sys }, { role: "user", content: user }]);
+  if (!raw) return null;
+  try {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const j = JSON.parse(m[0]) as { outcome?: string; product?: string; summary?: string; message?: string };
+    const prod = ctx.products.find((p) => j.product && p.name.toLowerCase() === String(j.product).toLowerCase());
+    return { ...j, buy_url: prod?.buy_url ?? "", product_name: prod?.name ?? "" };
+  } catch {
+    return null;
+  }
+}
+
+// wspólna obsługa zakończonej rozmowy (wychodzącej i przychodzącej)
+async function voiceWebhook(projectId: string, cfg: SalesCfg, projectName: string, payload: Record<string, unknown>) {
+  const data = (payload?.data ?? payload) as Record<string, unknown>;
+  const meta = (data?.metadata ?? {}) as Record<string, unknown>;
+  const call = (meta?.phone_call ?? {}) as Record<string, unknown>;
+  const dyn = (((data?.conversation_initiation_client_data ?? {}) as Record<string, unknown>).dynamic_variables ?? {}) as Record<string, unknown>;
+  const convId = String(data?.conversation_id ?? "");
+  const inbound = String(call?.direction ?? "outbound").toLowerCase() === "inbound";
+  const external = String(call?.external_number ?? dyn?.lead_phone ?? "").replace(/[^\d]/g, "");
+  const transcript = transcriptToText(data);
+  const summaryFromEleven = String(((data?.analysis ?? {}) as Record<string, unknown>)?.transcript_summary ?? "");
+
+  // deduplikacja: ten sam conversation_id może przyjść ponownie
+  if (await alreadySeen(projectId, `call:${convId}`)) return { ok: true, reason: "duplikat webhooka" };
+
+  // lead: z parametrów połączenia wychodzącego, po numerze, a dla przychodzącego — zakładamy nowego
+  let lead: Lead | null = null;
+  const leadId = String(dyn?.lead_id ?? "");
+  if (leadId) {
+    const { data: l } = await db.from("brain_leads").select("*").eq("id", leadId).eq("project_id", projectId).maybeSingle();
+    lead = (l as Lead) ?? null;
+  }
+  if (!lead && external) {
+    const { data: ls } = await db.from("brain_leads").select("*").eq("project_id", projectId).neq("phone", "").limit(2000);
+    const cands = (ls ?? []).filter((l) => {
+      const d = String(l.phone).replace(/[^\d]/g, "");
+      return d && (d === external || external.endsWith(d) || d.endsWith(external));
+    });
+    if (cands.length === 1) lead = cands[0] as Lead;
+  }
+  if (!lead && inbound && external) {
+    const { data: created, error } = await db
+      .from("brain_leads")
+      .insert({
+        project_id: projectId, name: "", email: "", phone: `+${external}`, temp: "warm",
+        status: "replied", channel: "phone", meta: { source: "inbound_call" },
+      })
+      .select("*")
+      .single();
+    if (error) console.error("voice: nie udało się założyć leada", error.message);
+    lead = (created as Lead) ?? null;
+  }
+  if (!lead) {
+    await db.from("brain_events").insert({ project_id: projectId, type: "call_unmatched", data: { external, convId, inbound } });
+    return { ok: false, reason: "nie dopasowano leada do numeru" };
+  }
+
+  const durationSec = Number((meta?.call_duration_secs ?? 0) as number) || 0;
+  await db.from("brain_lead_messages").insert({
+    lead_id: lead.id,
+    project_id: projectId,
+    channel: "phone",
+    direction: inbound ? "in" : "out",
+    subject: summaryFromEleven.slice(0, 200) || (inbound ? "Rozmowa przychodząca" : "Rozmowa wychodząca"),
+    content: transcript || "(brak transkrypcji)",
+    status: "received",
+    meta: { call: true, conversation_id: convId, duration_s: durationSec, inbound, auto: !inbound },
+  });
+
+  const patch: Record<string, unknown> = { unread: true, updated_at: new Date().toISOString() };
+  if (inbound) patch.last_in_at = new Date().toISOString();
+  else patch.last_out_at = new Date().toISOString();
+
+  // za krótka rozmowa = nieodebrane/poczta głosowa — nie analizujemy, tylko planujemy ponowienie
+  if (!transcript || durationSec < 12) {
+    const followupDays = cfg.followup_days ?? 3;
+    await db.from("brain_leads").update({
+      ...patch,
+      status: lead.status === "new" ? "contacted" : lead.status,
+      next_at: new Date(Date.now() + followupDays * 864e5).toISOString(),
+    }).eq("id", lead.id);
+    return { ok: true, reason: "rozmowa zbyt krótka (brak odbioru / poczta głosowa)" };
+  }
+
+  const analysis = await analyzeCall(projectId, cfg, lead, transcript);
+  const outcome = String(analysis?.outcome ?? "followup");
+  const statusMap: Record<string, string> = { won: "won", lost: "lost", handoff: "handoff", interested: "replied", followup: "contacted" };
+  const newStatus = statusMap[outcome] ?? "contacted";
+
+  // obiecany link do zakupu wysyłamy sami — klient dostaje go zaraz po rozmowie
+  let linkSent = false;
+  if (cfg.voice?.send_link !== false && ["won", "interested"].includes(outcome) && analysis?.buy_url) {
+    const text = [
+      analysis.message || `Dziękuję za rozmowę! Zgodnie z ustaleniami przesyłam link do ${analysis.product_name}.`,
+      "",
+      `${analysis.product_name}: ${analysis.buy_url}`,
+    ].join("\n");
+    const waOpen = lead.last_in_at && Date.now() - new Date(lead.last_in_at).getTime() < 24 * 3600e3;
+    const res = lead.email
+      ? await sendEmail(cfg, lead.email, `Po naszej rozmowie — ${analysis.product_name}`, text, `call:${convId}`)
+      : lead.phone && (cfg.channels?.whatsapp || inbound) && waOpen
+      ? await sendWhatsApp(cfg, lead.phone, text, false)
+      : { ok: false, error: "brak kanału do wysłania linku (lead bez e-maila, okno WhatsApp zamknięte)" };
+    await db.from("brain_lead_messages").insert({
+      lead_id: lead.id, project_id: projectId, channel: lead.email ? "email" : "whatsapp", direction: "out",
+      subject: `Po rozmowie — ${analysis.product_name}`, content: text,
+      status: res.ok ? "sent" : "failed",
+      meta: { auto: true, after_call: true, provider_id: (res as { id?: string }).id ?? null, error: res.ok ? null : res.error },
+    });
+    linkSent = res.ok;
+  }
+
+  const followupDays = cfg.followup_days ?? 3;
+  await db.from("brain_leads").update({
+    ...patch,
+    status: newStatus,
+    notes: analysis?.summary ? `${lead.notes ? lead.notes + "\n" : ""}[rozmowa] ${analysis.summary}`.slice(0, 2000) : lead.notes,
+    next_at: ["won", "lost", "handoff"].includes(outcome) ? null : new Date(Date.now() + followupDays * 864e5).toISOString(),
+  }).eq("id", lead.id);
+
+  return { ok: true, outcome, linkSent, summary: analysis?.summary ?? summaryFromEleven };
+}
+
+// podpis post-call webhooka ElevenLabs (gdy w konfiguracji ustawiono webhook_secret)
+async function elevenSignatureOk(raw: string, header: string | null, secret?: string): Promise<boolean> {
+  if (!secret) return true;
+  if (!header) return false;
+  const parts = Object.fromEntries(header.split(",").map((p) => p.trim().split("=") as [string, string]));
+  const t = parts.t, v0 = parts.v0;
+  if (!t || !v0) return false;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${t}.${raw}`));
+  const hex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return hex === v0;
 }
 
 // ── router ──────────────────────────────────────────────────────────────────
@@ -751,6 +1251,25 @@ Deno.serve(async (req) => {
       body = await req.json();
     } catch {
       body = {};
+    }
+
+    // post-call webhook ElevenLabs (rozmowy wychodzące i przychodzące)
+    if (hook === "voice") {
+      const proj = await projectByHookKey(urlKey);
+      if (!proj) return J({ error: "invalid key" }, 401);
+      const rawBody = JSON.stringify(body);
+      if (!(await elevenSignatureOk(rawBody, req.headers.get("elevenlabs-signature"), proj.cfg.voice?.webhook_secret))) {
+        console.error("voice: zły podpis webhooka");
+        return J({ error: "bad signature" }, 401);
+      }
+      const type = String((body as Record<string, unknown>).type ?? "");
+      if (type && type !== "post_call_transcription") return J({ ok: true, skipped: type });
+      const work = voiceWebhook(proj.projectId, proj.cfg, proj.name, body)
+        .then((r) => console.log("voice webhook:", JSON.stringify(r).slice(0, 300)));
+      // @ts-ignore EdgeRuntime dostępny w Supabase Edge
+      if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(work.catch((e: unknown) => console.error("voice", e)));
+      else await work;
+      return J({ ok: true });
     }
 
     // webhooki przychodzące — szybki 200, robota w tle
@@ -839,6 +1358,44 @@ Deno.serve(async (req) => {
       if (TERMINAL.has((lead as Lead).status)) return J({ error: "lead zamknięty" }, 400);
       const res = await sendToLead(proj.projectId, proj.cfg, lead as Lead, { auto: false });
       return res.ok ? J({ ok: true }) : J({ error: res.error }, 400);
+    }
+
+    if (action === "voice.call") {
+      const { data: lead } = await db.from("brain_leads").select("*").eq("id", String(body.lead_id)).eq("project_id", proj.projectId).maybeSingle();
+      if (!lead) return J({ error: "not found" }, 404);
+      if (TERMINAL.has((lead as Lead).status)) return J({ error: "lead zamknięty" }, 400);
+      const res = await startCall(proj.projectId, proj.cfg, lead as Lead, proj.name);
+      if (res.ok) {
+        await db.from("brain_lead_messages").insert({
+          lead_id: (lead as Lead).id, project_id: proj.projectId, channel: "phone", direction: "out",
+          subject: "Połączenie wychodzące (ręczne)", content: "(rozmowa rozpoczęta — transkrypcja po zakończeniu)",
+          status: "sent", meta: { auto: false, call: true, conversation_id: (res as { id?: string }).id ?? null },
+        });
+        await db.from("brain_leads").update({ last_out_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", (lead as Lead).id);
+      }
+      return res.ok ? J({ ok: true, conversation_id: (res as { id?: string }).id ?? null }) : J({ error: res.error }, 400);
+    }
+
+    if (action === "voice.sync") {
+      const res = await syncVoiceAgent(proj.projectId, proj.cfg, proj.name);
+      return res.ok ? J({ ok: true, chars: (res as { chars?: number }).chars }) : J({ error: res.error }, 400);
+    }
+
+    if (action === "voice.test") {
+      // rozmowa testowa na własny numer — bez zapisu do bazy leadów
+      const to = String(body.to ?? "").trim();
+      if (!to) return J({ error: "brak numeru" }, 400);
+      const res = await startCall(proj.projectId, proj.cfg, {
+        id: "", project_id: proj.projectId, name: String(body.name ?? "Test"), email: "", phone: to, company: "",
+        temp: "warm", status: "new", channel: "phone", notes: "Rozmowa testowa z panelu.", attempts: 0,
+        meta: {}, last_in_at: null, last_out_at: null, next_at: null,
+      } as unknown as Lead, proj.name);
+      return res.ok ? J({ ok: true }) : J({ error: res.error }, 400);
+    }
+
+    if (action === "voice.status") {
+      const why = voiceNotReady(proj.cfg);
+      return J({ ready: !why, reason: why, enabled: !!proj.cfg.voice?.enabled });
     }
 
     if (action === "test") {

@@ -128,6 +128,42 @@ async function fetchUrlText(url: string): Promise<string> {
   }
 }
 
+// ── maskowanie sekretów w odpowiedziach do panelu ───────────────────────────
+const SECRET_MASK = "••••";
+const SALES_SECRET_PATHS = [["email", "resend_key"], ["whatsapp", "wa_token"]];
+const CHANNEL_SECRET_PATHS = [["page_token"], ["wa_token"], ["app_secret"]];
+const maskValue = (v: unknown) => {
+  const str = String(v ?? "");
+  return str ? `${SECRET_MASK}${str.slice(-4)}` : "";
+};
+function maskSecrets(cfg: Record<string, unknown>, paths: string[][]): Record<string, unknown> {
+  const out = JSON.parse(JSON.stringify(cfg ?? {})) as Record<string, unknown>;
+  for (const path of paths) {
+    let node: Record<string, unknown> | undefined = out;
+    for (let i = 0; i < path.length - 1; i++) node = node?.[path[i]] as Record<string, unknown> | undefined;
+    const leaf = path[path.length - 1];
+    if (node && node[leaf]) node[leaf] = maskValue(node[leaf]);
+  }
+  return out;
+}
+// wartość zamaskowana = użytkownik jej nie zmieniał → bierzemy poprzednią z bazy
+function restoreSecrets(incoming: Record<string, unknown>, prev: Record<string, unknown>, paths: string[][]): Record<string, unknown> {
+  const out = JSON.parse(JSON.stringify(incoming ?? {})) as Record<string, unknown>;
+  for (const path of paths) {
+    let node: Record<string, unknown> | undefined = out;
+    let old: Record<string, unknown> | undefined = prev;
+    for (let i = 0; i < path.length - 1; i++) {
+      node = node?.[path[i]] as Record<string, unknown> | undefined;
+      old = old?.[path[i]] as Record<string, unknown> | undefined;
+    }
+    const leaf = path[path.length - 1];
+    if (!node) continue;
+    const val = String(node[leaf] ?? "");
+    if (val.startsWith(SECRET_MASK) || (!val && old?.[leaf])) node[leaf] = old?.[leaf] ?? "";
+  }
+  return out;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return J({ error: "method" }, 405);
@@ -445,6 +481,9 @@ Deno.serve(async (req) => {
       }
 
       // ── sprzedawca (AI sales) ─────────────────────────────────────────
+      // Sekrety kanałów nie wracają do przeglądarki w jawnej postaci: panel cache'uje
+      // odpowiedzi w localStorage, a pole input pokazuje wartość w DevTools.
+      // Zamiast wartości wysyłamy maskę; przy zapisie maska = „zostaw jak było".
       case "sales.get": {
         const pid = String(body.project_id || "");
         await assertProject(user, pid);
@@ -455,7 +494,7 @@ Deno.serve(async (req) => {
           config = { ...config, hook_key: config.hook_key ?? newToken(), demo_key: config.demo_key ?? newToken() };
           await db.from("brain_sales").upsert({ project_id: pid, config, updated_at: new Date().toISOString() });
         }
-        return J({ config });
+        return J({ config: maskSecrets(config, SALES_SECRET_PATHS) });
       }
       case "sales.set": {
         const pid = String(body.project_id || "");
@@ -465,9 +504,10 @@ Deno.serve(async (req) => {
         const prev = (cur?.config ?? {}) as Record<string, unknown>;
         const hook_key = prev.hook_key ?? newToken();
         const demo_key = prev.demo_key ?? newToken();
+        const merged = restoreSecrets(incoming, prev, SALES_SECRET_PATHS);
         await db
           .from("brain_sales")
-          .upsert({ project_id: pid, config: { ...incoming, hook_key, demo_key }, updated_at: new Date().toISOString() });
+          .upsert({ project_id: pid, config: { ...merged, hook_key, demo_key, _last_tick: prev._last_tick }, updated_at: new Date().toISOString() });
         return J({ ok: true });
       }
       case "sales.rotateDemo": {
@@ -506,7 +546,8 @@ Deno.serve(async (req) => {
         const pid = String(body.project_id || "");
         await assertProject(user, pid);
         const rows = (Array.isArray(body.rows) ? body.rows : []).slice(0, 2000).map(leadRow).filter((r) => r.email || r.phone);
-        const { data: existing } = await db.from("brain_leads").select("email, phone").eq("project_id", pid);
+        // PostgREST domyślnie oddaje maks. 1000 wierszy — przy większej bazie dedup po cichu przestawał działać
+        const { data: existing } = await db.from("brain_leads").select("email, phone").eq("project_id", pid).range(0, 99_999);
         const seenE = new Set((existing ?? []).map((l) => l.email.toLowerCase()).filter(Boolean));
         const seenP = new Set((existing ?? []).map((l) => l.phone.replace(/[^\d]/g, "")).filter(Boolean));
         const fresh: typeof rows = [];
@@ -602,7 +643,8 @@ Deno.serve(async (req) => {
         const pid = String(body.project_id || "");
         await assertProject(user, pid);
         const { data } = await db.from("brain_channels").select("*").eq("project_id", pid).order("created_at");
-        return J({ channels: data ?? [] });
+        const channels = (data ?? []).map((c) => ({ ...c, config: maskSecrets((c.config ?? {}) as Record<string, unknown>, CHANNEL_SECRET_PATHS) }));
+        return J({ channels });
       }
       case "channels.create": {
         const pid = String(body.project_id || "");
@@ -613,7 +655,9 @@ Deno.serve(async (req) => {
             project_id: pid,
             type: String(body.type || "widget"),
             name: String(body.name || ""),
-            config: body.config ?? {},
+            config: Object.fromEntries(
+              Object.entries((body.config ?? {}) as Record<string, unknown>).map(([k, v]) => [k, typeof v === "string" ? v.trim() : v]),
+            ),
           })
           .select()
           .single();
@@ -626,7 +670,19 @@ Deno.serve(async (req) => {
         await assertProject(user, ch.project_id);
         const patch: Record<string, unknown> = {};
         if (body.name !== undefined) patch.name = body.name;
-        if (body.config !== undefined) patch.config = body.config;
+        if (body.config !== undefined) {
+          // panel dostaje tokeny zamaskowane — przy zapisie przywracamy oryginały,
+          // a pola tekstowe (page_id/ig_id/phone_number_id) trymujemy: wklejone z Meta
+          // potrafią mieć spację/enter na końcu i wtedy kanał nigdy się nie dopasuje
+          const { data: full } = await db.from("brain_channels").select("config").eq("id", body.id as string).maybeSingle();
+          const merged = restoreSecrets(
+            body.config as Record<string, unknown>,
+            (full?.config ?? {}) as Record<string, unknown>,
+            CHANNEL_SECRET_PATHS,
+          );
+          for (const [k, v] of Object.entries(merged)) if (typeof v === "string") merged[k] = v.trim();
+          patch.config = merged;
+        }
         if (body.enabled !== undefined) patch.enabled = !!body.enabled;
         await db.from("brain_channels").update(patch).eq("id", body.id as string);
         return J({ ok: true });

@@ -12,6 +12,7 @@ import {
   IcUpload,
   IcMail,
   IcWhatsApp,
+  IcPhone,
   IcSend,
   IcEye,
   IcPause,
@@ -160,7 +161,13 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
   const [cfg, setCfg] = useState(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
   const dirty = useRef(false)
+  // autopilot bez skonfigurowanego kanału tylko paliłby limit i generował błędy
+  const saved_ = cfgData?.config || {}
+  const channelReady = Boolean(
+    (saved_.email?.resend_key && saved_.email?.from_email) || (saved_.whatsapp?.phone_number_id && saved_.whatsapp?.wa_token),
+  )
 
   useEffect(() => {
     if (cfgData && !dirty.current) setCfg(cfgData.config || {})
@@ -173,11 +180,15 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
   }
   async function save() {
     setBusy(true)
+    setErr('')
     try {
       await api('sales.set', { project_id: projId, config: cfg })
       dirty.current = false
       setSaved(true)
       refreshCfg()
+    } catch (e) {
+      // bez tego błąd zapisu był niewidoczny: użytkownik myślał, że ustawienia poszły do bazy
+      setErr(e.message || 'Nie udało się zapisać ustawień')
     } finally {
       setBusy(false)
     }
@@ -252,7 +263,13 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
         <label className="f">
           <span className="mono">Samodzielne pisanie do lidów</span>
           <div className="chips">
-            <button type="button" className={cfg.enabled ? 'on' : ''} onClick={() => set('enabled', true)}>
+            <button
+              type="button"
+              className={cfg.enabled ? 'on' : ''}
+              disabled={!channelReady}
+              title={channelReady ? '' : 'Najpierw skonfiguruj kanał w zakładce Kanały (Resend albo WhatsApp)'}
+              onClick={() => set('enabled', true)}
+            >
               Włączony
             </button>
             <button type="button" className={!cfg.enabled ? 'on' : ''} onClick={() => set('enabled', false)}>
@@ -313,6 +330,8 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
           <button className="btn primary" onClick={save} disabled={busy}>
             {busy ? 'Zapisywanie…' : 'Zapisz ustawienia'}
           </button>
+          {err && <span className="badge danger">{err}</span>}
+          {!channelReady && <span className="badge warn">Skonfiguruj kanał, aby włączyć autopilota</span>}
           {saved && (
             <span className="badge ok">
               <IcCheck style={{ width: 11, height: 11 }} /> Zapisano
@@ -347,8 +366,11 @@ function CodeBox({ code }) {
 function Channels({ projId, cfgData, refreshCfg }) {
   const [cfg, setCfg] = useState(null)
   const [saved, setSaved] = useState(false)
+  const [err, setErr] = useState('')
   const [testTo, setTestTo] = useState('')
   const [testRes, setTestRes] = useState(null)
+  const [testPhone, setTestPhone] = useState('')
+  const [voiceRes, setVoiceRes] = useState(null)
   const dirty = useRef(false)
 
   useEffect(() => {
@@ -358,6 +380,7 @@ function Channels({ projId, cfgData, refreshCfg }) {
   if (!cfg) return <p className="muted">Ładowanie…</p>
   const email = cfg.email || {}
   const wa = cfg.whatsapp || {}
+  const voice = cfg.voice || {}
   const channels = cfg.channels || { email: true }
   const hook = cfg.hook_key || ''
   const setEmail = (k, v) => {
@@ -375,6 +398,20 @@ function Channels({ projId, cfgData, refreshCfg }) {
     setCfg((c) => ({ ...c, channels: { ...(c.channels || {}), [k]: v } }))
     setSaved(false)
   }
+  const setVoice = (k, v) => {
+    dirty.current = true
+    setCfg((c) => ({ ...c, voice: { ...(c.voice || {}), [k]: v } }))
+    setSaved(false)
+  }
+  async function voiceAction(action, payload) {
+    setVoiceRes(null)
+    try {
+      const r = await salesApi(hook, action, payload)
+      setVoiceRes({ ok: true, text: action === 'voice.sync' ? `Agent zaktualizowany (${r.chars} znaków promptu)` : 'Zlecono połączenie' })
+    } catch (e) {
+      setVoiceRes({ ok: false, text: e.message })
+    }
+  }
 
   async function save() {
     const next = { ...cfg }
@@ -382,10 +419,15 @@ function Channels({ projId, cfgData, refreshCfg }) {
       next.whatsapp = { ...next.whatsapp, verify_token: crypto.randomUUID().replaceAll('-', '').slice(0, 24) }
       setCfg(next)
     }
-    await api('sales.set', { project_id: projId, config: next })
-    dirty.current = false
-    setSaved(true)
-    refreshCfg()
+    setErr('')
+    try {
+      await api('sales.set', { project_id: projId, config: next })
+      dirty.current = false
+      setSaved(true)
+      refreshCfg()
+    } catch (e) {
+      setErr(e.message || 'Nie udało się zapisać kanałów')
+    }
   }
   async function sendTest() {
     setTestRes(null)
@@ -522,11 +564,99 @@ function Channels({ projId, cfgData, refreshCfg }) {
           </p>
           <CodeBox code={`${FN_BASE}/brain-sales?hook=wa&key=${hook}`} />
         </div>
+
+        <div className="card">
+          <span className="corner tl" />
+          <span className="corner br" />
+          <div className="row" style={{ marginBottom: 12 }}>
+            <IcPhone style={{ width: 18, height: 18, color: 'var(--acid)' }} />
+            <b>Telefon (ElevenLabs)</b>
+            <span className="right row" style={{ gap: 6 }}>
+              {voice.agent_id && voice.phone_id ? <span className="badge acid">Skonfigurowany</span> : <span className="badge">Nieaktywny</span>}
+            </span>
+          </div>
+          <label className="f">
+            <span className="mono">Rozmowy telefoniczne</span>
+            <div className="chips">
+              <button type="button" className={voice.enabled ? 'on' : ''} onClick={() => setVoice('enabled', true)}>
+                Włączone
+              </button>
+              <button type="button" className={!voice.enabled ? 'on' : ''} onClick={() => setVoice('enabled', false)}>
+                Wyłączone
+              </button>
+            </div>
+          </label>
+          <div className="fgrid">
+            <label className="f">
+              <span className="mono">ID agenta (ElevenLabs)</span>
+              <input value={voice.agent_id || ''} onChange={(e) => setVoice('agent_id', e.target.value.trim())} placeholder="agent_..." />
+            </label>
+            <label className="f">
+              <span className="mono">ID numeru agenta</span>
+              <input value={voice.phone_id || ''} onChange={(e) => setVoice('phone_id', e.target.value.trim())} placeholder="phnum_..." />
+            </label>
+          </div>
+          <div className="fgrid">
+            <label className="f">
+              <span className="mono">Nazwa sekretu z kluczem API</span>
+              <input value={voice.key_secret || 'ELEVENLABS_KEY'} onChange={(e) => setVoice('key_secret', e.target.value.trim())} />
+            </label>
+            <label className="f">
+              <span className="mono">Sekret podpisu webhooka</span>
+              <input type="password" value={voice.webhook_secret || ''} onChange={(e) => setVoice('webhook_secret', e.target.value)} autoComplete="off" />
+            </label>
+          </div>
+          <label className="f">
+            <span className="mono">Pierwsze zdanie agenta</span>
+            <input
+              value={voice.first_message || ''}
+              onChange={(e) => setVoice('first_message', e.target.value)}
+              placeholder="Dzień dobry, z tej strony…"
+            />
+          </label>
+          <label className="f">
+            <span className="mono">Po rozmowie wysyłać link do zakupu</span>
+            <div className="chips">
+              <button type="button" className={voice.send_link !== false ? 'on' : ''} onClick={() => setVoice('send_link', true)}>
+                Tak
+              </button>
+              <button type="button" className={voice.send_link === false ? 'on' : ''} onClick={() => setVoice('send_link', false)}>
+                Nie
+              </button>
+            </div>
+          </label>
+          <p className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
+            Agent dzwoni do lidów z kanałem „telefon" i odbiera połączenia przychodzące. Po każdej rozmowie zapisujemy
+            transkrypcję w historii leada, ustawiamy status i — jeśli klient prosił o ofertę — wysyłamy link do zakupu
+            e-mailem albo WhatsAppem. Prompt agenta buduje się z Bazy wiedzy: po jej zmianie kliknij „Synchronizuj agenta".
+          </p>
+          <div className="row" style={{ gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+            <button className="btn" onClick={() => voiceAction('voice.sync', {})} disabled={!voice.agent_id}>
+              Synchronizuj agenta
+            </button>
+            <input
+              style={{ maxWidth: 190 }}
+              value={testPhone}
+              onChange={(e) => setTestPhone(e.target.value)}
+              placeholder="+48 600 000 000"
+            />
+            <button className="btn" onClick={() => voiceAction('voice.test', { to: testPhone })} disabled={!testPhone || !voice.phone_id}>
+              Zadzwoń testowo
+            </button>
+            {voiceRes && <span className={voiceRes.ok ? 'badge ok' : 'badge danger'}>{voiceRes.text}</span>}
+          </div>
+          <p className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
+            <b>Webhook po rozmowie:</b> wklej ten adres w ElevenLabs (Post-call webhook) — bez niego nie zapiszemy
+            transkrypcji ani nie wyślemy linku po rozmowie.
+          </p>
+          <CodeBox code={`${FN_BASE}/brain-sales?hook=voice&key=${hook}`} />
+        </div>
       </div>
       <div className="row" style={{ marginTop: 16 }}>
         <button className="btn primary" onClick={save}>
           Zapisz kanały
         </button>
+        {err && <span className="badge danger">{err}</span>}
         {saved && (
           <span className="badge ok">
             <IcCheck style={{ width: 11, height: 11 }} /> Zapisano
@@ -703,6 +833,21 @@ function LeadPanel({ lead, hookKey, onClose, onChanged }) {
       setErr(e.message)
     }
   }
+  async function callNow() {
+    setErr('')
+    setBusy('call')
+    try {
+      await salesApi(hookKey, 'voice.call', { lead_id: lead.id })
+      const d = await api('lead.messages', { lead_id: lead.id })
+      setMsgs(d.messages)
+      onChanged()
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
   async function sendNow() {
     setErr('')
     setBusy('send')
@@ -746,6 +891,16 @@ function LeadPanel({ lead, hookKey, onClose, onChanged }) {
             <button className="btn sm primary" onClick={sendNow} disabled={busy === 'send'} title="Wygeneruj i wyślij od razu">
               <IcSend /> {busy === 'send' ? 'Wysyłanie…' : 'Wyślij teraz'}
             </button>
+            {lead.phone && (
+              <button
+                className="btn sm"
+                onClick={callNow}
+                disabled={busy === 'call'}
+                title="AI zadzwoni do leada (kanał telefoniczny musi być skonfigurowany)"
+              >
+                <IcPhone /> {busy === 'call' ? 'Dzwonię…' : 'Zadzwoń'}
+              </button>
+            )}
             {lead.status !== 'paused' ? (
               <button className="btn sm" onClick={() => setStatus('paused')} title="Autopilot pominie tego leada">
                 <IcPause /> Wstrzymaj
