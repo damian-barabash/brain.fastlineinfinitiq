@@ -130,7 +130,7 @@ async function fetchUrlText(url: string): Promise<string> {
 
 // ── maskowanie sekretów w odpowiedziach do panelu ───────────────────────────
 const SECRET_MASK = "••••";
-const SALES_SECRET_PATHS = [["email", "resend_key"], ["whatsapp", "wa_token"]];
+const SALES_SECRET_PATHS = [["email", "resend_key"], ["whatsapp", "wa_token"], ["voice", "api_key"], ["voice", "webhook_secret"]];
 const CHANNEL_SECRET_PATHS = [["page_token"], ["wa_token"], ["app_secret"]];
 const maskValue = (v: unknown) => {
   const str = String(v ?? "");

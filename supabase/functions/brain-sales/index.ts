@@ -61,7 +61,8 @@ type SalesCfg = {
     enabled?: boolean;
     agent_id?: string; // agent ElevenLabs (jeden na projekt — zasada: 1 projekt = 1 agent + 1 numer)
     phone_id?: string; // agent_phone_number_id z ElevenLabs (numer przypisany agentowi)
-    key_secret?: string; // nazwa sekretu Supabase z kluczem ElevenLabs (domyślnie ELEVENLABS_KEY)
+    api_key?: string; // klucz ElevenLabs TEGO projektu (jak klucz Resend — osobne konto na klienta)
+    key_secret?: string; // alternatywa: nazwa wspólnego sekretu Supabase (domyślnie ELEVENLABS_KEY)
     webhook_secret?: string; // sekret post-call webhooka (podpis ElevenLabs-Signature)
     first_message?: string; // pierwsze zdanie agenta przy połączeniu wychodzącym
     send_link?: boolean; // po rozmowie wysłać link do zakupu (domyślnie tak)
@@ -962,7 +963,12 @@ async function alreadySeen(projectId: string, mid: string): Promise<boolean> {
 // ElevenLabs — do nas obie wracają tym samym webhookiem po zakończeniu rozmowy.
 const ELEVEN = "https://api.elevenlabs.io/v1";
 
+// Klucz per projekt (jak Resend/WhatsApp): najpierw własny klucz projektu z konfiguracji,
+// a dopiero potem wspólny sekret Supabase — dzięki temu każdy klient może mieć swoje konto
+// ElevenLabs i własne rozliczenie, bez dotykania sekretów projektu Supabase.
 function elevenKey(cfg: SalesCfg): string {
+  const own = (cfg.voice?.api_key || "").trim();
+  if (own) return own;
   return Deno.env.get((cfg.voice?.key_secret || "ELEVENLABS_KEY").trim()) || "";
 }
 
@@ -971,7 +977,7 @@ function voiceNotReady(cfg: SalesCfg): string | null {
   const v = cfg.voice ?? {};
   if (!v.agent_id) return "brak ID agenta ElevenLabs";
   if (!v.phone_id) return "brak numeru telefonu agenta (phone_id)";
-  if (!elevenKey(cfg)) return `brak sekretu ${v.key_secret || "ELEVENLABS_KEY"} w Supabase`;
+  if (!elevenKey(cfg)) return `brak klucza API ElevenLabs (wpisz w karcie Telefon albo dodaj sekret ${v.key_secret || "ELEVENLABS_KEY"})`;
   return null;
 }
 

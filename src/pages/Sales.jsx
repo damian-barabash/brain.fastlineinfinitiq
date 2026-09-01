@@ -598,8 +598,14 @@ function Channels({ projId, cfgData, refreshCfg }) {
           </div>
           <div className="fgrid">
             <label className="f">
-              <span className="mono">Nazwa sekretu z kluczem API</span>
-              <input value={voice.key_secret || 'ELEVENLABS_KEY'} onChange={(e) => setVoice('key_secret', e.target.value.trim())} />
+              <span className="mono">Klucz API ElevenLabs (tego projektu)</span>
+              <input
+                type="password"
+                value={voice.api_key || ''}
+                onChange={(e) => setVoice('api_key', e.target.value.trim())}
+                autoComplete="off"
+                placeholder="sk_… — osobne konto na klienta"
+              />
             </label>
             <label className="f">
               <span className="mono">Sekret podpisu webhooka</span>
