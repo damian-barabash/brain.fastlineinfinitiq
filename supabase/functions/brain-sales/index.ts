@@ -640,7 +640,9 @@ async function sendToLead(projectId: string, cfg: SalesCfg, lead: Lead, opts: { 
 }
 
 // ── odpowiedź AI na wiadomość przychodzącą (e-mail / WhatsApp) ──────────────
-const STOP_RE = /(^|\n)\s*stop\b|\bwypisz mnie\b|\bproszę nie pisać\b|\bunsubscribe\b|\busuń mnie\b/i;
+// UWAGA: \b w JavaScripcie działa tylko na ASCII — po „ć"/„ń" granica słowa nigdy
+// nie zachodzi, więc „proszę nie pisać" z \b na końcu NIE działało jako STOP.
+const STOP_RE = /(^|\n)\s*stop\b|wypisz mnie|prosz[ęe] nie pisa[ćc]|nie pisz(?:cie)? (?:do mnie|więcej)|unsubscribe|usu[nń] mnie/i;
 
 // odcinamy cytowaną historię — inaczej nasza własna stopka „Odpisz STOP" w cytacie
 // wypisywała leada przy każdej odpowiedzi, a cały wątek szedł do modelu po raz drugi
