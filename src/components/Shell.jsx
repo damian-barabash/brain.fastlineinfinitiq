@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom'
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { api, session, getTheme, setTheme } from '../lib/api.js'
 import { warm } from '../lib/useCached.js'
+import { ensureProductAccess } from '../shared/platform.js'
 import {
   IcDash,
   IcBot,
@@ -31,6 +32,24 @@ export default function Shell() {
   const user = session.user
   const ws = session.ws
   const proj = session.proj
+
+  // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
+  // może wpuścić do Brain kogoś, komu produkt odebrano.
+  useEffect(() => {
+    let alive = true
+    ensureProductAccess('brain')
+      .then(({ ok }) => {
+        if (alive && !ok) {
+          session.setProj(null)
+          nav('/', { replace: true })
+        }
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // prefetch: chunki stron + dane wszystkich sekcji — nawigacja bez czekania
   useEffect(() => {

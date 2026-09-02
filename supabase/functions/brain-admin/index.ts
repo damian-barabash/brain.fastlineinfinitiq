@@ -164,6 +164,23 @@ function restoreSecrets(incoming: Record<string, unknown>, prev: Record<string, 
   return out;
 }
 
+// ── sekrety integracji wklejane w panelu ─────────────────────────────────────
+// Token Unipile i klucz Google Maps admin wkleja w Integracjach, więc leżą
+// w brain_settings. Do przeglądarki wracają zamaskowane (jak klucze kanałów),
+// a zapis maski oznacza „nie zmieniałem" — stara wartość zostaje.
+const SETTINGS_SECRET_PATHS: Record<string, string[][]> = {
+  unipile: [["api_key"]],
+  maps: [["api_key"]],
+};
+
+// Klucz integracji: najpierw wklejony w panelu, potem sekret Supabase pod nazwą.
+async function integrationKey(key: string, defaultSecret: string) {
+  const { data } = await db.from("brain_settings").select("value").eq("key", key).maybeSingle();
+  const cfg = (data?.value ?? {}) as Record<string, string>;
+  const token = (cfg.api_key || "").trim() || Deno.env.get((cfg.key_secret || defaultSecret).trim()) || "";
+  return { cfg, token };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return J({ error: "method" }, 405);
@@ -247,7 +264,15 @@ Deno.serve(async (req) => {
           .select("id, name, created_at")
           .eq("workspace_id", ws)
           .order("created_at");
-        return J({ projects: data ?? [] });
+        let projects = data ?? [];
+        // klient może być zawężony do wybranych projektów (brain_user_projects);
+        // brak wierszy = pełny dostęp do workspace'u, jak dotąd
+        if (!admin) {
+          const { data: allow } = await db.from("brain_user_projects").select("project_id").eq("user_id", user.id);
+          const ids = new Set((allow ?? []).map((r: { project_id: string }) => r.project_id));
+          if (ids.size) projects = projects.filter((p: { id: string }) => ids.has(p.id));
+        }
+        return J({ projects });
       }
       case "proj.create": {
         const ws = String(body.workspace_id || "");
@@ -705,16 +730,153 @@ Deno.serve(async (req) => {
       }
 
       // ── ustawienia globalne (provider AI) ─────────────────────────────
+      // Sprawdzenie klucza Google Places — panel pokazuje wynik przy „Integracje".
+      case "maps.check": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const { token } = await integrationKey("maps", "GOOGLE_MAPS_KEY");
+        if (!token) return J({ ok: false, error: "Brak klucza Google — wklej go w Integracjach" });
+        const r = await fetch("https://places.googleapis.com/v1/places:searchText", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": token,
+            "X-Goog-FieldMask": "places.displayName",
+          },
+          body: JSON.stringify({ textQuery: "warsztat samochodowy Kraków", languageCode: "pl", maxResultCount: 1 }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) return J({ ok: true, sample: data?.places?.[0]?.displayName?.text ?? "" });
+        const msg = String(data?.error?.message ?? `HTTP ${r.status}`);
+        // najczęstszy przypadek: klucz działa, ale API nie jest włączone w projekcie
+        const url = String(data?.error?.details?.[0]?.metadata?.activationUrl ?? "");
+        return J({ ok: false, error: msg.slice(0, 300), activation_url: url });
+      }
+
+      // ── produkty platformy (Brain, Hand, …) ───────────────────────────
+      // Klient widzi produkty przypisane do JEGO workspace'u, admin — wszystkie aktywne.
+      case "products.mine": {
+        if (admin) {
+          const { data } = await db.from("fiq_products").select("*").eq("active", true).order("sort");
+          return J({ products: data ?? [] });
+        }
+        const { data: links } = await db
+          .from("fiq_workspace_products").select("product_key").eq("workspace_id", user.workspace_id ?? "");
+        const keys = (links ?? []).map((r: { product_key: string }) => r.product_key);
+        if (!keys.length) return J({ products: [] });
+        const { data } = await db.from("fiq_products").select("*").in("key", keys).eq("active", true).order("sort");
+        return J({ products: data ?? [] });
+      }
+      case "products.list": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const { data } = await db.from("fiq_products").select("*").order("sort");
+        return J({ products: data ?? [] });
+      }
+      case "products.set": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const p = (body.product ?? {}) as Record<string, unknown>;
+        const key = String(p.key ?? "").trim().toLowerCase();
+        if (!key) return J({ error: "brak klucza produktu" }, 400);
+        const { error } = await db.from("fiq_products").upsert({
+          key,
+          name: String(p.name ?? "").trim(),
+          sense: String(p.sense ?? "Brain"),
+          domain: String(p.domain ?? "").trim(),
+          tagline: String(p.tagline ?? "").trim(),
+          accent: String(p.accent ?? "#B8FF00").trim(),
+          active: p.active !== false,
+          sort: Number(p.sort ?? 0) || 0,
+        }, { onConflict: "key" });
+        if (error) throw error;
+        return J({ ok: true });
+      }
+      case "ws.products": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const { data } = await db.from("fiq_workspace_products").select("workspace_id, product_key");
+        const map: Record<string, string[]> = {};
+        for (const r of data ?? []) {
+          const row = r as { workspace_id: string; product_key: string };
+          (map[row.workspace_id] ??= []).push(row.product_key);
+        }
+        return J({ map });
+      }
+      case "ws.products.set": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const wsId = String(body.workspace_id || "");
+        const key = String(body.product_key || "");
+        if (!wsId || !key) return J({ error: "brak danych" }, 400);
+        if (body.enabled) {
+          const { error } = await db.from("fiq_workspace_products").upsert({ workspace_id: wsId, product_key: key });
+          if (error) throw error;
+        } else {
+          const { error } = await db.from("fiq_workspace_products").delete().eq("workspace_id", wsId).eq("product_key", key);
+          if (error) throw error;
+        }
+        return J({ ok: true });
+      }
+      case "user.projects": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const { data } = await db.from("brain_user_projects").select("project_id").eq("user_id", String(body.user_id || ""));
+        return J({ project_ids: (data ?? []).map((r: { project_id: string }) => r.project_id) });
+      }
+      case "user.projects.set": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const uid = String(body.user_id || "");
+        const ids = (Array.isArray(body.project_ids) ? body.project_ids : []).map(String).filter(Boolean);
+        await db.from("brain_user_projects").delete().eq("user_id", uid);
+        if (ids.length) {
+          const { error } = await db.from("brain_user_projects").insert(ids.map((project_id) => ({ user_id: uid, project_id })));
+          if (error) throw error;
+        }
+        return J({ ok: true });
+      }
+      // ── Unipile: jeden token na całą platformę (jak dostawca AI) ──────
+      case "unipile.accounts": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const { cfg, token } = await integrationKey("unipile", "UNIPILE_TOKEN");
+        const dsn = String(cfg.dsn ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        if (!dsn) return J({ error: "Brak DSN Unipile — uzupełnij w Integracjach" }, 400);
+        if (!token) return J({ error: "Brak tokenu Unipile — wklej go w Integracjach" }, 400);
+        const r = await fetch(`https://${dsn}/api/v1/accounts`, {
+          headers: { "X-API-KEY": token, accept: "application/json" },
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!r.ok) return J({ error: `Unipile ${r.status}: ${(await r.text().catch(() => "")).slice(0, 200)}` }, 400);
+        const data = await r.json().catch(() => ({}));
+        const items = (data?.items ?? data?.accounts ?? []) as Array<Record<string, unknown>>;
+        return J({
+          accounts: items.map((a) => ({
+            id: String(a.id ?? ""),
+            name: String((a.name as string) ?? (a.username as string) ?? ""),
+            type: String(a.type ?? a.provider ?? ""),
+            status: String((a.sources as Array<{ status?: string }> | undefined)?.[0]?.status ?? a.status ?? "ok"),
+          })),
+        });
+      }
+
       case "settings.get": {
         if (!admin) return J({ error: "forbidden" }, 403);
         const { data } = await db.from("brain_settings").select("key, value");
-        return J({ settings: Object.fromEntries((data ?? []).map((r) => [r.key, r.value])) });
+        return J({
+          settings: Object.fromEntries(
+            (data ?? []).map((r) => [
+              r.key,
+              SETTINGS_SECRET_PATHS[r.key]
+                ? maskSecrets((r.value ?? {}) as Record<string, unknown>, SETTINGS_SECRET_PATHS[r.key])
+                : r.value,
+            ]),
+          ),
+        });
       }
       case "settings.set": {
         if (!admin) return J({ error: "forbidden" }, 403);
-        await db
-          .from("brain_settings")
-          .upsert({ key: String(body.key), value: body.value ?? {}, updated_at: new Date().toISOString() });
+        const sKey = String(body.key);
+        let sVal = (body.value ?? {}) as Record<string, unknown>;
+        if (SETTINGS_SECRET_PATHS[sKey]) {
+          const { data: prev } = await db.from("brain_settings").select("value").eq("key", sKey).maybeSingle();
+          sVal = restoreSecrets(sVal, (prev?.value ?? {}) as Record<string, unknown>, SETTINGS_SECRET_PATHS[sKey]);
+        }
+        await db.from("brain_settings").upsert({ key: sKey, value: sVal, updated_at: new Date().toISOString() });
         return J({ ok: true });
       }
 

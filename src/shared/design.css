@@ -1,4 +1,8 @@
-/* Brain — FIQ design system. Ciemny domyślnie + jasny motyw. */
+/* ── FIQ design system (wspólna dla wszystkich produktów: Brain, Hand, …) ──
+   ŹRÓDŁO PRAWDY: repozytorium fiq-shared. Nie edytuj kopii w produkcie —
+   zmieniaj tutaj i uruchom `npm run sync:shared` w aplikacjach.
+   Akcent produktu ustawia sama aplikacja: <html style="--product-accent: #FF7A18">
+   (Brain zostaje przy kwasowej zieleni, Hand ma pomarańcz „wykonania"). */
 :root,
 :root[data-theme='dark'] {
   --bg: #0d0d0d;
@@ -9,11 +13,11 @@
   --text: #f5f5f0;
   --dim: rgba(245, 245, 240, 0.6);
   --dim2: rgba(245, 245, 240, 0.38);
-  --acid: #b8ff00;
-  --acid-fill: #b8ff00;
+  --acid: var(--product-accent, #b8ff00);
+  --acid-fill: var(--product-accent, #b8ff00);
   --acid-ink: #0d0d0d;
-  --acid-soft: rgba(184, 255, 0, 0.12);
-  --acid-line: rgba(184, 255, 0, 0.32);
+  --acid-soft: color-mix(in srgb, var(--product-accent, #b8ff00) 14%, transparent);
+  --acid-line: color-mix(in srgb, var(--product-accent, #b8ff00) 34%, transparent);
   --danger: #ff5a4e;
   --warn: #ffc24e;
   --ok: #2fbf71;
@@ -29,8 +33,8 @@
   --dim: rgba(13, 13, 13, 0.68);
   --dim2: rgba(13, 13, 13, 0.46);
   /* akcenty tekstowe/ikony — głęboka zieleń (kontrast na białym), wypełnienia — soczysty jaskrawy */
-  --acid: #4a9c00;
-  --acid-fill: #82d600;
+  --acid: var(--product-accent-dark, #4a9c00);
+  --acid-fill: var(--product-accent-light, #82d600);
   --acid-ink: #0d0d0d;
   --acid-soft: rgba(102, 190, 0, 0.15);
   --acid-line: rgba(74, 156, 0, 0.55);
@@ -885,4 +889,33 @@ label.f > span {
 }
 .chat-msgs .msg {
   overflow-wrap: anywhere;
+}
+
+/* ── utility wspólne dla paneli produktów ─────────────────────────────────── */
+.empty {
+  text-align: center;
+  color: var(--dim);
+  padding: 28px 12px;
+}
+/* ramka wyjaśniająca pod formularzem: status integracji, ostrzeżenie, podpowiedź */
+.note {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--acid);
+  background: var(--acid-soft);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.note.warn {
+  border-left-color: var(--danger);
+}
+/* link, który nie krzyczy — używany w opisach i statusach integracji */
+.link-dim {
+  color: var(--dim);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+.link-dim:hover {
+  color: var(--acid);
+  border-bottom-color: var(--acid);
 }
