@@ -267,7 +267,18 @@ async function loadSalesContext(projectId: string, cfg: SalesCfg) {
     .map((i) => i.content)
     .join("\n")
     .slice(0, 1600);
-  return { projectName: proj?.name ?? "", products: prods, firmText, ai };
+  // wskazówki trenera dla SPRZEDAWCY — osobny zbiór niż doradcy (inna rola,
+  // inne błędy); zatwierdzone dopisują się do jego instrukcji
+  const { data: fb } = await db
+    .from("brain_feedback")
+    .select("note, corrected")
+    .eq("project_id", projectId)
+    .eq("scope", "sales")
+    .eq("status", "approved")
+    .order("created_at", { ascending: false })
+    .limit(12);
+  const lessons = (fb ?? []) as { note: string; corrected: string }[];
+  return { projectName: proj?.name ?? "", products: prods, firmText, ai, lessons };
 }
 
 function buildSalesPrompt(
@@ -286,6 +297,34 @@ function buildSalesPrompt(
     `ZASADY DOBREJ SPRZEDAŻY: piszesz krótko (zimny e-mail maks. 90-120 słów, WhatsApp maks. 2-4 zdania); personalizujesz po danych leada; jedna główna korzyść na wiadomość; dokładnie jedno wezwanie do działania; zero ogólników i pustych frazesów; każdy follow-up wnosi coś nowego (inny kąt, konkret, dowód), nie jest "przypominajką".`,
   );
   if (cfg.rules) lines.push(`Dodatkowe zasady od firmy: ${cfg.rules}`);
+  // Model 9B przy każdej wiadomości zaczyna od nowa: wita się, przedstawia
+  // i powtarza to samo zdanie o produkcie. Stan rozmowy podajemy twardo.
+  const firstTurn = !lead.attempts;
+  lines.push(
+    firstTurn
+      ? `\n=== STAN ROZMOWY ===\nTo PIERWSZY kontakt z tym klientem. Przedstaw się JEDNYM krótkim zdaniem i przejdź do rzeczy.`
+      : `\n=== STAN ROZMOWY ===\nTo KOLEJNA wiadomość w trwającej rozmowie (wysłano już ${lead.attempts}). NIE witaj się ponownie, NIE przedstawiaj się, NIE powtarzaj zdań, które już padły. Odnieś się do tego, co klient napisał ostatnio, i wnieś coś nowego.`,
+  );
+  lines.push(
+    `\n=== JAK ROZMAWIASZ ===\n` +
+      `- Odpowiadasz na OSTATNIĄ wiadomość klienta, nie na całą rozmowę od nowa.\n` +
+      `- Nie zaczynasz dwóch wiadomości pod rząd tak samo.\n` +
+      `- Maksymalnie JEDNO pytanie w wiadomości.\n` +
+      `- Proponujesz jeden, najlepiej dopasowany produkt — nie wyliczasz całej oferty.\n` +
+      `- Gdy klient pyta o cenę, PODAJESZ ją z bazy. Jeśli nie wiadomo, o który produkt chodzi — podajesz widełki i dopiero potem dopytujesz. Nigdy nie odpowiadasz samym „to zależy".\n` +
+      `- Piszesz jak człowiek: normalne zdania, bez sloganów i sztucznego entuzjazmu.`,
+  );
+  if (ctx.lessons?.length) {
+    const block = ctx.lessons
+      .map((l) => `- ${l.note}${l.corrected ? ` (wzór dobrej odpowiedzi: ${l.corrected.slice(0, 220)})` : ""}`)
+      .join("\n")
+      .slice(0, 1800);
+    lines.push(
+      `\n=== WSKAZÓWKI TRENERA (zatwierdzone poprawki) ===\n${block}\n` +
+        `Stosujesz je wtedy, kiedy pasują do miejsca rozmowy. Wskazówka o początku rozmowy dotyczy WYŁĄCZNIE ` +
+        `pierwszej wiadomości. Żadnej wskazówki nie powtarzasz dwa razy w tej samej rozmowie.`,
+    );
+  }
   lines.push(
     `ŹRÓDŁO PRAWDY: fakty o firmie i produktach bierzesz WYŁĄCZNIE z poniższej bazy. Niczego nie zmyślasz — brakującą informację pomijasz albo proponujesz kontakt.`,
   );
@@ -302,8 +341,15 @@ function buildSalesPrompt(
       lines.push(parts.join("\n"));
     }
   }
+  // Bez rozdzielenia „kto pisze" od „do kogo pisze" model potrafi przedstawić się
+  // imieniem klienta („Cześć Marek, nazywam się Marek").
   lines.push(
-    `\n=== LEAD ===\nImię/nazwa: ${lead.name || "nieznane"}${lead.company ? `\nFirma: ${lead.company}` : ""}\nTemperatura: ${lead.temp === "warm" ? "ciepły (miał już kontakt z firmą / wyraził zainteresowanie)" : "zimny (pierwszy kontakt, nie zna firmy)"}${lead.notes ? `\nNotatki handlowca: ${lead.notes}` : ""}`,
+    `\n=== KTO JEST KIM ===\nTy nazywasz się: ${cfg.persona || "handlowiec firmy"}. Odbiorca nazywa się: ${
+      lead.name || "nieznane"
+    }. To dwie różne osoby — nigdy nie przedstawiasz się imieniem odbiorcy.`,
+  );
+  lines.push(
+    `\n=== ODBIORCA (klient, do którego piszesz) ===\nImię/nazwa: ${lead.name || "nieznane"}${lead.company ? `\nFirma: ${lead.company}` : ""}\nTemperatura: ${lead.temp === "warm" ? "ciepły (miał już kontakt z firmą / wyraził zainteresowanie)" : "zimny (pierwszy kontakt, nie zna firmy)"}${lead.notes ? `\nNotatki handlowca: ${lead.notes}` : ""}`,
   );
   lines.push(
     `\nPROCES ZAMKNIĘCIA: gdy klient wyraża chęć zakupu — najpierw upewnij się, KTÓRY produkt go interesuje (jeśli nie wynika to jasno z rozmowy, dopytaj). Dopiero potem wyślij link do zakupu tego produktu. Po wysłaniu linku i potwierdzeniu przez klienta dodaj na końcu znacznik [WYGRANA].`,
@@ -1345,6 +1391,29 @@ Deno.serve(async (req) => {
       const upstream = await callProviderStream(ctx.ai, msgs);
       if (!upstream) return J({ error: "AI niedostępne" }, 502);
       return sseSalesChat(upstream);
+    }
+
+    // trening sprzedawcy: kciuk w dół z uwagą w testowym czacie. Czat jest
+    // symulowany i nic nie zapisuje, więc wskazówka jest samodzielna — liczy się
+    // treść uwagi, a nie konkretna wiadomość.
+    if (action === "lesson") {
+      const dp = await projectByDemoKey(String(body.key ?? ""));
+      if (!dp) return J({ error: "invalid key" }, 401);
+      const note = String(body.note ?? "").trim().slice(0, 1000);
+      if (!note) return J({ error: "Napisz, co poprawić" }, 400);
+      const { data } = await db
+        .from("brain_feedback")
+        .insert({
+          project_id: dp.projectId,
+          scope: "sales",
+          rating: "down",
+          note,
+          original: String(body.original ?? "").slice(0, 4000),
+          status: "approved",
+        })
+        .select("id")
+        .single();
+      return J({ ok: true, id: data?.id });
     }
 
     // akcje panelu — autoryzacja hook_key projektu

@@ -71,6 +71,7 @@ function buildSystemPrompt(
   }[],
   lessons: Lesson[],
   userText: string,
+  firstTurn: boolean,
 ): string {
   const scored = products
     .map((p) => ({ p, s: relevanceScore(userText, p.name) }))
@@ -88,7 +89,25 @@ function buildSystemPrompt(
   lines.push(`Odpowiadasz ${adv.language === "auto" ? "w języku klienta" : "po polsku"}.`);
   if (adv.tone) lines.push(`Ton wypowiedzi: ${adv.tone}.`);
   const len = adv.length === "short" ? "1-2 zdania" : adv.length === "long" ? "do 6 zdań" : "2-4 zdania";
-  lines.push(`Długość odpowiedzi: zwykle ${len}. Piszesz konkretnie, bez lania wody.`);
+  lines.push(`Długość odpowiedzi: ${len} i ANI ZDANIA WIĘCEJ. Piszesz konkretnie, bez lania wody.`);
+  // Bez tego model 9B przy każdej odpowiedzi zaczyna od nowa: wita się, przedstawia
+  // i recytuje ofertę. Stan rozmowy podajemy twardo, a nie prosimy o „naturalność".
+  lines.push(
+    firstTurn
+      ? `\n=== STAN ROZMOWY ===\nTo PIERWSZA wiadomość w tej rozmowie. Możesz przywitać się i przedstawić JEDNYM krótkim zdaniem.`
+      : `\n=== STAN ROZMOWY ===\nTo KOLEJNA wiadomość w trwającej rozmowie. NIE witaj się, NIE przedstawiaj się, NIE podawaj swojego imienia ani nazwy firmy na wstępie. Klient już wie, z kim rozmawia. Zacznij od razu od odpowiedzi na to, co przed chwilą napisał.`,
+  );
+  lines.push(
+    `\n=== JAK ROZMAWIASZ ===\n` +
+      `- Odpowiadasz na OSTATNIĄ wiadomość klienta, a nie na całą rozmowę od nowa.\n` +
+      `- Nigdy nie powtarzasz zdań, które już padły z Twojej strony w tej rozmowie. Każda odpowiedź wnosi coś nowego.\n` +
+      `- Nie zaczynasz dwóch odpowiedzi pod rząd tak samo.\n` +
+      `- Gdy klient nie wie, czego chce (np. pisze „jeszcze nie wiem") — NIE wysypujesz oferty. Zadajesz jedno krótkie pytanie, które zawęża wybór, albo opowiadasz jedną konkretną rzecz i pytasz, czy o to chodziło.\n` +
+      `- Maksymalnie JEDNO pytanie w wiadomości.\n` +
+      `- Proponujesz jeden, najlepiej pasujący produkt — nie wyliczasz całej listy.\n` +
+      `- Mówisz jak człowiek: normalne zdania, bez sloganów i bez sztucznego entuzjazmu.\n` +
+      `- Gdy klient pyta o cenę, PODAJESZ ją z bazy wiedzy. Jeśli nie wiadomo, o który produkt chodzi — podajesz widełki (od najtańszego do najdroższego) i dopiero potem dopytujesz. Nigdy nie odpowiadasz samym „to zależy".`,
+  );
   if (adv.rules) lines.push(`Dodatkowe zasady: ${adv.rules}`);
   lines.push(
     `ŹRÓDŁO PRAWDY: odpowiadasz WYŁĄCZNIE na podstawie poniższej bazy wiedzy. Jeśli czegoś w niej nie ma — mówisz wprost, że nie masz tej informacji, i proponujesz kontakt z działem sprzedaży. Niczego nie zmyślasz.`,
@@ -117,8 +136,14 @@ function buildSystemPrompt(
       block += entry;
     }
     if (block) {
+      // „stosuj BEZWZGLĘDNIE w KAŻDEJ odpowiedzi" sprawiało, że wskazówka napisana
+      // pod początek rozmowy (np. „wspomnij o szkoleniu X") wracała w co drugim
+      // zdaniu. Wskazówki mają obowiązywać wtedy, kiedy pasują do sytuacji.
       lines.push(
-        `\n=== STAŁE WSKAZÓWKI TRENERA (zatwierdzone poprawki — stosuj je BEZWZGLĘDNIE w każdej odpowiedzi) ===\n${block.trim()}`,
+        `\n=== WSKAZÓWKI TRENERA (zatwierdzone poprawki) ===\n${block.trim()}\n` +
+          `Stosujesz je wtedy, kiedy pasują do miejsca rozmowy. Wskazówka mówiąca o początku rozmowy ` +
+          `dotyczy WYŁĄCZNIE pierwszej wiadomości i nie wraca w kolejnych. Żadnej wskazówki nie powtarzasz ` +
+          `dwa razy w tej samej rozmowie.`,
       );
     }
   }
@@ -163,6 +188,7 @@ async function loadContextFresh(publicKey: string) {
       .from("brain_feedback")
       .select("note, corrected")
       .eq("project_id", ch.project_id)
+      .eq("scope", "advisor")
       .eq("status", "approved")
       .order("created_at", { ascending: false })
       .limit(LESSON_LIMIT),
@@ -455,6 +481,7 @@ Deno.serve(async (req) => {
       ctx.products,
       ctx.lessons,
       question + " " + note,
+      false,
     );
     const messages = [
       { role: "system", content: sys },
@@ -541,6 +568,7 @@ Deno.serve(async (req) => {
     ctx.products,
     ctx.lessons,
     message + " " + history.slice(-4).map((m) => m.content).join(" "),
+    history.length === 0,
   );
 
   const t0 = Date.now();

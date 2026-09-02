@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, session, salesApi, FN_BASE } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
 import SalesChat from '../components/SalesChat.jsx'
+import Lessons from '../shared/Lessons.jsx'
 import {
   IcPlus,
   IcTrash,
@@ -71,6 +72,12 @@ export default function Sales() {
           </div>
         )}
       </div>
+      <Lessons
+        projId={proj.id}
+        scope="sales"
+        title="Poprawki z czatów — sprzedawca"
+        hint="Uwagi dla sprzedawcy: co ma pisać inaczej. Włączone dopisują się do jego instrukcji i działają w mailach, na WhatsAppie i przy telefonie."
+      />
       <div className="tabs">
         <button className={tab === 'leads' ? 'on' : ''} onClick={() => setTab('leads')}>
           Lidzi

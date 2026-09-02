@@ -919,3 +919,28 @@ label.f > span {
   color: var(--acid);
   border-bottom-color: var(--acid);
 }
+
+/* wiersz poprawki trenera — oddzielony, żeby dało się je czytać jedna po drugiej */
+.lesson-row {
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+}
+.lesson-row:first-child {
+  border-top: none;
+  padding-top: 4px;
+}
+
+/* formularz poprawki pod wiadomością sprzedawcy w teście rozmowy */
+.lesson-inline {
+  border: 1px solid var(--acid-line);
+  background: var(--acid-soft);
+  padding: 10px;
+  margin-top: 6px;
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+}
+.lesson-inline textarea {
+  width: 100%;
+  box-sizing: border-box;
+}

@@ -729,6 +729,72 @@ Deno.serve(async (req) => {
         return J({ ok: true });
       }
 
+      // ── poprawki trenera (kciuki i przepisane odpowiedzi z czatu) ─────
+      // Zatwierdzone trafiają do promptu doradcy jako stałe wskazówki, więc muszą
+      // dać się przejrzeć, poprawić i skasować — inaczej zła lekcja żyje wiecznie.
+      case "lessons.list": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        // scope rozdziela trenowanie doradcy od trenowania sprzedawcy — to dwie
+        // różne role i wskazówka dobra dla jednej potrafi zepsuć drugą
+        const scope = body.scope === "sales" ? "sales" : "advisor";
+        const { data } = await db
+          .from("brain_feedback")
+          .select("id, rating, note, original, corrected, status, scope, created_at, conversation_id, message_id")
+          .eq("project_id", pid)
+          .eq("scope", scope)
+          .order("created_at", { ascending: false })
+          .limit(300);
+        return J({ lessons: data ?? [] });
+      }
+      // Wskazówkę można dopisać ręcznie, nie tylko przez kciuk w czacie —
+      // sprzedawcę trenuje się zwykle na sucho, zanim ktokolwiek do niego napisze.
+      case "lessons.create": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const note = String(body.note ?? "").trim().slice(0, 1000);
+        if (!note) return J({ error: "Wpisz treść wskazówki" }, 400);
+        const { data } = await db
+          .from("brain_feedback")
+          .insert({
+            project_id: pid,
+            scope: body.scope === "sales" ? "sales" : "advisor",
+            rating: "down",
+            note,
+            original: "",
+            corrected: String(body.corrected ?? "").slice(0, 4000),
+            status: "approved",
+          })
+          .select("id")
+          .single();
+        return J({ id: data?.id });
+      }
+      case "lessons.set": {
+        const id = String(body.id || "");
+        const { data: row } = await db.from("brain_feedback").select("project_id").eq("id", id).maybeSingle();
+        if (!row) return J({ error: "not found" }, 404);
+        await assertProject(user, row.project_id);
+        const patch: Record<string, unknown> = {};
+        if (body.note !== undefined) patch.note = String(body.note).slice(0, 1000);
+        if (body.corrected !== undefined) patch.corrected = String(body.corrected).slice(0, 4000);
+        if (body.status !== undefined) {
+          const st = String(body.status);
+          if (!["approved", "pending", "rejected"].includes(st)) return J({ error: "zły status" }, 400);
+          patch.status = st;
+        }
+        if (!Object.keys(patch).length) return J({ error: "nic do zapisania" }, 400);
+        await db.from("brain_feedback").update(patch).eq("id", id);
+        return J({ ok: true });
+      }
+      case "lessons.delete": {
+        const id = String(body.id || "");
+        const { data: row } = await db.from("brain_feedback").select("project_id").eq("id", id).maybeSingle();
+        if (!row) return J({ error: "not found" }, 404);
+        await assertProject(user, row.project_id);
+        await db.from("brain_feedback").delete().eq("id", id);
+        return J({ ok: true });
+      }
+
       // ── ustawienia globalne (provider AI) ─────────────────────────────
       // Sprawdzenie klucza Google Places — panel pokazuje wynik przy „Integracje".
       case "maps.check": {

@@ -2,8 +2,8 @@
 // Rozmowa symulowana (wirtualny lead), nic nie zapisuje się w bazie ani statystykach.
 // Używany w zakładce "Test rozmowy" panelu i na publicznej stronie /sdemo.
 import { useEffect, useRef, useState } from 'react'
-import { salesChatStream } from '../lib/api.js'
-import { IcSend, IcSpark } from './Icons.jsx'
+import { salesChatStream, salesApi } from '../lib/api.js'
+import { IcSend, IcSpark, IcThumbDown, IcCheck } from './Icons.jsx'
 
 function linkify(text) {
   const parts = text.split(/(https?:\/\/[^\s)]+)/g)
@@ -166,6 +166,7 @@ export default function SalesChat({ demoKey, storeKey, autoFocus }) {
                 {FLAG_BADGE[m.flag][0]}
               </span>
             )}
+            {m.role !== 'user' && m.content && demoKey && <Correct demoKey={demoKey} original={m.content} />}
           </div>
         ))}
         {started && !busy && msgs[msgs.length - 1]?.role === 'ai' && !msgs[msgs.length - 1]?.flag && (
@@ -190,5 +191,60 @@ export default function SalesChat({ demoKey, storeKey, autoFocus }) {
         </button>
       </div>
     </>
+  )
+}
+
+// Poprawka do wiadomości sprzedawcy. Czat jest symulowany i nic nie zapisuje,
+// więc zapamiętujemy samą uwagę trenera — działa od następnej wiadomości
+// i widać ją w panelu „Poprawki z czatów" nad zakładkami.
+function Correct({ demoKey, original }) {
+  const [open, setOpen] = useState(false)
+  const [note, setNote] = useState('')
+  const [state, setState] = useState('')
+
+  async function save() {
+    if (!note.trim()) return
+    setState('busy')
+    try {
+      await salesApi(demoKey, 'lesson', { note: note.trim(), original })
+      setState('done')
+      setNote('')
+      setTimeout(() => {
+        setOpen(false)
+        setState('')
+      }, 1500)
+    } catch (e) {
+      setState(e.message)
+    }
+  }
+
+  if (!open) {
+    return (
+      <button className="btn sm" style={{ marginTop: 4 }} onClick={() => setOpen(true)} title="Napisz, co poprawić">
+        <IcThumbDown /> Popraw
+      </button>
+    )
+  }
+  return (
+    <div className="lesson-inline">
+      <textarea
+        rows={2}
+        autoFocus
+        placeholder="Co jest nie tak? np. za długie, nie podał ceny, znów się przedstawił"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save()
+        }}
+      />
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn sm primary" onClick={save} disabled={state === 'busy'}>
+          <IcCheck /> {state === 'busy' ? 'Zapisuję…' : 'Zapamiętaj na stałe'}
+        </button>
+        <button className="btn sm" onClick={() => setOpen(false)}>Anuluj</button>
+        {state === 'done' && <span className="muted">Zapamiętane — działa od następnej wiadomości.</span>}
+        {state && !['busy', 'done'].includes(state) && <span className="err">{state}</span>}
+      </div>
+    </div>
   )
 }

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, session, chatStream, FN_BASE, PANEL_ORIGIN } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
 import ChatFeedback from '../components/ChatFeedback.jsx'
+import Lessons from '../shared/Lessons.jsx'
 import {
   IcCheck,
   IcSend,
@@ -36,6 +37,12 @@ export default function Advisor() {
           <p className="sub">Persona, sposób mówienia i kanały, w których pracuje.</p>
         </div>
       </div>
+      <Lessons
+        projId={proj.id}
+        scope="advisor"
+        title="Poprawki z czatów — doradca"
+        hint="Uwagi, które dawałeś doradcy w rozmowach testowych. Włączone dopisują się do jego instrukcji i działają na wszystkich kanałach."
+      />
       <div className="tabs">
         <button className={tab === 'archetype' ? 'on' : ''} onClick={() => setTab('archetype')}>
           Archetyp
@@ -53,6 +60,7 @@ export default function Advisor() {
     </>
   )
 }
+
 
 // ── Archetyp ────────────────────────────────────────────────────────────────
 function Archetype({ projId }) {
