@@ -326,6 +326,21 @@ label.f > span {
   font-style: normal;
   color: var(--acid);
 }
+/* pod nazwą zmysłu (Brain, Hand) idzie pełna nazwa produktu — inaczej klient
+   z dwoma produktami widzi w obu panelach to samo słowo */
+.sb-logo .word small {
+  display: block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 400;
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--dim2);
+  text-transform: uppercase;
+  margin-top: 2px;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .sb-ctx {
   margin-top: 12px;
   overflow: hidden;

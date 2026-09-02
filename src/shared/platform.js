@@ -69,7 +69,7 @@ export const session = {
     else localStorage.removeItem(LS.proj)
   },
   clear() {
-    for (const k of [LS.token, LS.user, LS.ws, LS.proj, LS.product]) localStorage.removeItem(k)
+    for (const k of [LS.token, LS.user, LS.ws, LS.proj, LS.product, 'fiq_product_pending']) localStorage.removeItem(k)
     // cache danych innego użytkownika nie może przetrwać wylogowania
     try {
       for (let i = localStorage.length - 1; i >= 0; i--) {
@@ -180,14 +180,29 @@ export async function api(action, payload = {}) {
 // Domeny są różne, więc localStorage się nie współdzieli: token przekazujemy
 // we fragmencie URL (#sso=…), który nie trafia do serwera, i od razu czyścimy.
 export function gotoProduct(product) {
-  const url = `https://${product.domain}/#sso=${encodeURIComponent(session.token)}`
+  // Oprócz sesji przenosimy WYBÓR produktu — inaczej klient, który przed chwilą
+  // kliknął produkt, musiałby wybrać go drugi raz już w jego domenie.
+  const url =
+    `https://${product.domain}/#sso=${encodeURIComponent(session.token)}` +
+    `&p=${encodeURIComponent(product.key)}`
   location.href = url
+}
+
+// Produkt wskazany w adresie przy przejściu z innej domeny — Picker go
+// podejmuje i pomija krok wyboru. Jednorazowy: po użyciu znika.
+const LS_PENDING = 'fiq_product_pending'
+export function takePendingProduct() {
+  const key = localStorage.getItem(LS_PENDING) || ''
+  if (key) localStorage.removeItem(LS_PENDING)
+  return key
 }
 
 export async function consumeSso() {
   const m = location.hash.match(/[#&]sso=([^&]+)/)
   if (!m) return false
   const token = decodeURIComponent(m[1])
+  const p = location.hash.match(/[#&]p=([^&]+)/)
+  if (p) localStorage.setItem(LS_PENDING, decodeURIComponent(p[1]))
   history.replaceState(null, '', location.pathname + location.search)
   if (!token) return false
   localStorage.setItem(LS.token, token)

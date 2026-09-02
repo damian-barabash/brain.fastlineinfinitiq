@@ -3,6 +3,7 @@
 // użytkownicy, workspace'y, przypisanie produktów, dostawca AI, integracje.
 import { useEffect, useState } from 'react'
 import { api } from './platform.js'
+import IntegrationsAdmin from './IntegrationsAdmin.jsx'
 import { IcPlus, IcTrash, IcKey, IcCheck, IcUsers, IcFolder, IcSpark, IcBox, IcLinkedIn, IcRefresh, IcMap } from './Icons.jsx'
 
 export default function AdminPanel() {
@@ -28,9 +29,6 @@ export default function AdminPanel() {
         <button className={tab === 'prod' ? 'on' : ''} onClick={() => setTab('prod')}>
           Produkty
         </button>
-        <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>
-          Dostawca AI
-        </button>
         <button className={tab === 'int' ? 'on' : ''} onClick={() => setTab('int')}>
           Integracje
         </button>
@@ -38,8 +36,7 @@ export default function AdminPanel() {
       {tab === 'users' && <Users />}
       {tab === 'ws' && <Workspaces />}
       {tab === 'prod' && <Products />}
-      {tab === 'ai' && <AiProvider />}
-      {tab === 'int' && <Integrations />}
+      {tab === 'int' && <IntegrationsAdmin />}
     </>
   )
 }
@@ -284,74 +281,6 @@ function Workspaces() {
   )
 }
 
-function AiProvider() {
-  const [cfg, setCfg] = useState(null)
-  const [saved, setSaved] = useState(false)
-
-  useEffect(() => {
-    api('settings.get').then((d) => setCfg(d.settings.ai_provider || {}))
-  }, [])
-
-  async function save() {
-    await api('settings.set', { key: 'ai_provider', value: cfg })
-    setSaved(true)
-    setTimeout(() => setSaved(false), 1600)
-  }
-
-  if (!cfg) return <p className="muted">Ładowanie…</p>
-  const set = (k) => (e) => setCfg((c) => ({ ...c, [k]: e.target.value }))
-  return (
-    <div className="grid g2">
-      <div className="card">
-        <div className="row" style={{ marginBottom: 14 }}>
-          <IcSpark style={{ width: 18, height: 18, color: 'var(--acid)' }} />
-          <b>Dostawca modelu (OpenAI-compatible)</b>
-          {saved && <span className="badge ok">Zapisano</span>}
-        </div>
-        <label className="f">
-          <span className="mono">Base URL (puste = Barabash AI z sekretów)</span>
-          <input value={cfg.base_url || ''} onChange={set('base_url')} placeholder="https://api.deepseek.com" />
-        </label>
-        <label className="f">
-          <span className="mono">Model</span>
-          <input value={cfg.model || ''} onChange={set('model')} placeholder="qwen3.5:9b / deepseek-chat" />
-        </label>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-          <label className="f">
-            <span className="mono">Temperature</span>
-            <input type="number" step="0.1" min="0" max="2" value={cfg.temperature ?? 0.6} onChange={(e) => setCfg((c) => ({ ...c, temperature: Number(e.target.value) }))} />
-          </label>
-          <label className="f">
-            <span className="mono">Max tokens</span>
-            <input type="number" min="100" max="4000" value={cfg.max_tokens ?? 700} onChange={(e) => setCfg((c) => ({ ...c, max_tokens: Number(e.target.value) }))} />
-          </label>
-        </div>
-        <label className="f">
-          <span className="mono">Nazwa sekretu z kluczem API</span>
-          <input value={cfg.key_secret || 'BRAIN_AI_KEY'} onChange={set('key_secret')} />
-        </label>
-        <button className="btn primary" onClick={save}>
-          Zapisz konfigurację
-        </button>
-      </div>
-      <div className="card">
-        <h3 style={{ fontSize: 14, marginBottom: 12 }}>Jak przełączyć na innego dostawcę</h3>
-        <ol style={{ paddingLeft: 18, color: 'var(--dim)', fontSize: 13, display: 'grid', gap: 8 }}>
-          <li>Dodaj sekret z kluczem API w Supabase (np. <code className="mono">DEEPSEEK_KEY</code>).</li>
-          <li>Wpisz Base URL dostawcy (endpoint musi być zgodny z OpenAI <code className="mono">/v1/chat/completions</code>).</li>
-          <li>Podaj model i nazwę sekretu, zapisz — zmiana działa od następnej wiadomości, bez deployu.</li>
-        </ol>
-        <div className="spacer" />
-        <p className="muted">
-          Obecnie: Barabash AI (własny serwer, model rezydentny w pamięci — pierwsze tokeny w ~1 s). Streaming SSE
-          włączony zawsze.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-// ── dostęp klienta do wybranych projektów (puste = wszystkie w workspace) ────
 function UserProjects({ user, onClose }) {
   const [projects, setProjects] = useState(null)
   const [checked, setChecked] = useState([])
@@ -508,189 +437,3 @@ function Products() {
 }
 
 // ── integracje platformy: jeden token Unipile na całą instalację ─────────────
-function Integrations() {
-  const [uni, setUni] = useState(null)
-  const [maps, setMaps] = useState(null)
-  const [accounts, setAccounts] = useState(null)
-  const [mapsState, setMapsState] = useState(null)
-  const [busy, setBusy] = useState('')
-  const [msg, setMsg] = useState('')
-  const note = (t) => {
-    setMsg(t)
-    setTimeout(() => setMsg(''), 5000)
-  }
-
-  useEffect(() => {
-    api('settings.get').then((d) => {
-      setUni(d.settings.unipile || { dsn: '', api_key: '', key_secret: 'UNIPILE_TOKEN' })
-      setMaps(d.settings.maps || { api_key: '', key_secret: 'GOOGLE_MAPS_KEY' })
-    })
-  }, [])
-
-  async function save(key, value, after) {
-    setBusy(key)
-    try {
-      await api('settings.set', { key, value })
-      note('Zapisano.')
-      if (after) await after()
-    } catch (e) {
-      note('Błąd: ' + e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  async function loadAccounts() {
-    setBusy('acc')
-    try {
-      const d = await api('unipile.accounts')
-      setAccounts(d.accounts ?? [])
-      if (!d.accounts?.length) note('Token działa, ale nie ma podłączonych kont.')
-    } catch (e) {
-      note('Błąd: ' + e.message)
-      setAccounts([])
-    } finally {
-      setBusy('')
-    }
-  }
-
-  async function checkMaps() {
-    setBusy('maps')
-    try {
-      setMapsState(await api('maps.check'))
-    } catch (e) {
-      setMapsState({ ok: false, error: e.message })
-    } finally {
-      setBusy('')
-    }
-  }
-
-  if (!uni || !maps) return <p className="muted">Ładowanie…</p>
-  return (
-    <div className="grid g2">
-      <div className="card">
-        <div className="row" style={{ marginBottom: 10 }}>
-          <IcLinkedIn style={{ width: 18, height: 18, color: 'var(--acid)' }} />
-          <b>Unipile — LinkedIn</b>
-          <a className="right mono link-dim" href="https://dashboard.unipile.com" target="_blank" rel="noreferrer">
-            gdzie to skonfigurować ↗
-          </a>
-        </div>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Jeden token na całą platformę (jak dostawca AI). Konta LinkedIn podpinasz w panelu Unipile, a tutaj tylko
-          wklejasz token — z którego konta szuka dany projekt, wybierasz w produkcie Hand → Integracje.
-        </p>
-        <label className="f">
-          <span className="mono">DSN instancji</span>
-          <input
-            value={uni.dsn || ''}
-            onChange={(e) => setUni({ ...uni, dsn: e.target.value.trim() })}
-            placeholder="api8.unipile.com:13843"
-          />
-        </label>
-        <label className="f">
-          <span className="mono">Token API</span>
-          <input
-            type="password"
-            value={uni.api_key || ''}
-            onChange={(e) => setUni({ ...uni, api_key: e.target.value })}
-            placeholder={uni.api_key ? '' : 'wklej token'}
-          />
-        </label>
-        <p className="muted" style={{ fontSize: 11.5, marginTop: -4 }}>
-          Zapisany token wraca zamaskowany — zostaw jak jest, żeby go nie zmieniać.
-        </p>
-        <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn primary" onClick={() => save('unipile', uni, loadAccounts)} disabled={busy === 'unipile'}>
-            {busy === 'unipile' ? 'Zapisywanie…' : 'Zapisz i sprawdź'}
-          </button>
-          <button className="btn" onClick={loadAccounts} disabled={busy === 'acc'}>
-            <IcRefresh /> {busy === 'acc' ? 'Sprawdzam…' : 'Pobierz konta'}
-          </button>
-        </div>
-        {accounts !== null && (
-          <div style={{ marginTop: 14 }}>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--dim2)' }}>PODŁĄCZONE KONTA</span>
-            {accounts.map((a) => (
-              <div className="row" key={a.id} style={{ padding: '7px 0', borderTop: '1px solid var(--line)' }}>
-                <IcLinkedIn style={{ width: 14, height: 14, color: 'var(--acid)' }} />
-                <span>{a.name || a.id}</span>
-                <span className="right mono" style={{ fontSize: 10 }}>{a.type} · {a.status}</span>
-              </div>
-            ))}
-            {accounts.length === 0 && (
-              <p className="muted" style={{ marginTop: 6 }}>
-                Brak kont —{' '}
-                <a className="link-dim" href="https://dashboard.unipile.com" target="_blank" rel="noreferrer">
-                  podłącz LinkedIn w Unipile ↗
-                </a>
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="card">
-        <div className="row" style={{ marginBottom: 10 }}>
-          <IcMap style={{ width: 18, height: 18, color: 'var(--acid)' }} />
-          <b>Google Places — firmy z mapy</b>
-          <a
-            className="right mono link-dim"
-            href="https://console.cloud.google.com/apis/library/places.googleapis.com"
-            target="_blank"
-            rel="noreferrer"
-          >
-            gdzie to skonfigurować ↗
-          </a>
-        </div>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Źródło leadów lokalnych: nazwa, adres, telefon, strona, oceny. Klucz jeden na całą platformę. W projekcie
-          Google musi być włączone <b>Places API (New)</b> — inaczej klucz odpowie błędem mimo że jest poprawny.
-        </p>
-        <label className="f">
-          <span className="mono">Klucz API</span>
-          <input
-            type="password"
-            value={maps.api_key || ''}
-            onChange={(e) => setMaps({ ...maps, api_key: e.target.value })}
-            placeholder={maps.api_key ? '' : 'wklej klucz'}
-          />
-        </label>
-        <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn primary" onClick={() => save('maps', maps, checkMaps)} disabled={busy === 'maps'}>
-            {busy === 'maps' ? 'Sprawdzam…' : 'Zapisz i sprawdź'}
-          </button>
-          <button className="btn" onClick={checkMaps} disabled={busy === 'maps'}>
-            <IcRefresh /> Sprawdź klucz
-          </button>
-        </div>
-        {mapsState && (
-          <div className="note" style={{ marginTop: 12 }}>
-            {mapsState.ok ? (
-              <span>
-                <b style={{ color: 'var(--acid)' }}>Działa.</b> Przykładowy wynik: {mapsState.sample || '—'}
-              </span>
-            ) : (
-              <span>
-                <b style={{ color: 'var(--danger)' }}>Nie działa.</b> {mapsState.error}{' '}
-                <a
-                  className="link-dim"
-                  href={mapsState.activation_url || 'https://console.cloud.google.com/apis/library/places.googleapis.com'}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  włącz API tutaj ↗
-                </a>
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-      {msg && (
-        <p className="muted" style={{ gridColumn: '1 / -1' }}>
-          {msg}
-        </p>
-      )}
-    </div>
-  )
-}

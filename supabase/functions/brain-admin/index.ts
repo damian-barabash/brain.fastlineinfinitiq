@@ -171,6 +171,7 @@ function restoreSecrets(incoming: Record<string, unknown>, prev: Record<string, 
 const SETTINGS_SECRET_PATHS: Record<string, string[][]> = {
   unipile: [["api_key"]],
   maps: [["api_key"]],
+  ai_provider: [["api_key"]],
 };
 
 // Klucz integracji: najpierw wklejony w panelu, potem sekret Supabase pod nazwą.
@@ -180,6 +181,133 @@ async function integrationKey(key: string, defaultSecret: string) {
   const token = (cfg.api_key || "").trim() || Deno.env.get((cfg.key_secret || defaultSecret).trim()) || "";
   return { cfg, token };
 }
+
+// ── realny stan integracji platformy ────────────────────────────────────────
+// Wklejony klucz nic nie znaczy: klucz Google bywa poprawny, a Places API
+// wyłączone; token Unipile bywa ważny, a nie ma pod nim żadnego konta. Dlatego
+// pytamy dostawcę naprawdę, a wynik trzymamy przez CHECK_TTL_MS, żeby nie robić
+// tego przy każdym otwarciu panelu.
+const CHECK_TTL_MS = 10 * 60_000;
+const PLACES_CONSOLE = "https://console.cloud.google.com/apis/library/places.googleapis.com";
+const UNIPILE_CONSOLE = "https://dashboard.unipile.com";
+
+type Status = { ok: boolean; reason?: string; url?: string; detail?: string; checked_at?: string };
+
+async function readStatus(key: string): Promise<Status | null> {
+  const { data } = await db.from("brain_settings").select("value").eq("key", `${key}_status`).maybeSingle();
+  const v = (data?.value ?? null) as Status | null;
+  if (!v?.checked_at) return null;
+  return Date.now() - new Date(v.checked_at).getTime() < CHECK_TTL_MS ? v : null;
+}
+async function writeStatus(key: string, st: Status): Promise<Status> {
+  const value = { ...st, checked_at: new Date().toISOString() };
+  await db.from("brain_settings").upsert({ key: `${key}_status`, value, updated_at: new Date().toISOString() });
+  return value;
+}
+
+async function checkMaps(force = false): Promise<Status> {
+  const { token } = await integrationKey("maps", "GOOGLE_MAPS_KEY");
+  if (!token) return { ok: false, reason: "Brak klucza — wklej go poniżej", url: PLACES_CONSOLE };
+  if (!force) {
+    const c = await readStatus("maps");
+    if (c) return c;
+  }
+  try {
+    const r = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": token, "X-Goog-FieldMask": "places.displayName" },
+      body: JSON.stringify({ textQuery: "warsztat Kraków", languageCode: "pl", maxResultCount: 1 }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      return await writeStatus("maps", { ok: true, detail: String(data?.places?.[0]?.displayName?.text ?? "") });
+    }
+    const msg = String(data?.error?.message ?? `HTTP ${r.status}`);
+    const url = String(data?.error?.details?.[0]?.metadata?.activationUrl ?? PLACES_CONSOLE);
+    const short = /has not been used|is disabled|SERVICE_DISABLED/i.test(msg)
+      ? "Places API (New) nie jest włączone w projekcie Google"
+      : msg.slice(0, 200);
+    return await writeStatus("maps", { ok: false, reason: short, url });
+  } catch (e) {
+    return { ok: false, reason: `Google nie odpowiada: ${String((e as Error).message ?? e).slice(0, 140)}`, url: PLACES_CONSOLE };
+  }
+}
+
+async function checkUnipile(force = false): Promise<Status> {
+  const { cfg, token } = await integrationKey("unipile", "UNIPILE_TOKEN");
+  const dsn = String(cfg.dsn ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  if (!dsn || !token) {
+    return { ok: false, reason: dsn ? "Brak tokenu — wklej go poniżej" : "Brak DSN i tokenu", url: UNIPILE_CONSOLE };
+  }
+  if (!force) {
+    const c = await readStatus("unipile");
+    if (c) return c;
+  }
+  try {
+    const r = await fetch(`https://${dsn}/api/v1/accounts`, {
+      headers: { "X-API-KEY": token, accept: "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!r.ok) {
+      return await writeStatus("unipile", {
+        ok: false,
+        reason: `Unipile ${r.status}: ${(await r.text().catch(() => "")).slice(0, 160)}`,
+        url: UNIPILE_CONSOLE,
+      });
+    }
+    const data = await r.json().catch(() => ({}));
+    const n = ((data?.items ?? data?.accounts ?? []) as unknown[]).length;
+    return await writeStatus(
+      "unipile",
+      n
+        ? { ok: true, detail: `${n} podłączonych kont` }
+        : { ok: false, reason: "Token działa, ale nie ma podłączonego żadnego konta", url: UNIPILE_CONSOLE },
+    );
+  } catch (e) {
+    return { ok: false, reason: `Unipile nie odpowiada: ${String((e as Error).message ?? e).slice(0, 140)}`, url: UNIPILE_CONSOLE };
+  }
+}
+
+// Model sprawdzamy najtańszym możliwym zapytaniem — chodzi o to, czy klucz
+// i adres w ogóle odpowiadają, a nie o jakość odpowiedzi.
+async function checkAi(force = false): Promise<Status> {
+  const { data } = await db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle();
+  const ai = (data?.value ?? {}) as Record<string, string | number>;
+  let baseUrl = String(ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
+  if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
+  if (baseUrl && !baseUrl.endsWith("/v1")) baseUrl += "/v1";
+  const key = String(ai.api_key || "").trim() || Deno.env.get(String(ai.key_secret || "BRAIN_AI_KEY").trim()) || "";
+  const model = String(ai.model || "").trim() || "qwen3.5:9b";
+  if (!baseUrl) return { ok: false, reason: "Brak adresu (Base URL) dostawcy" };
+  if (!key) return { ok: false, reason: "Brak klucza API — wklej go poniżej" };
+  if (!force) {
+    const c = await readStatus("ai_provider");
+    if (c) return c;
+  }
+  try {
+    const t0 = Date.now();
+    const r = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, max_tokens: 1, stream: false, messages: [{ role: "user", content: "ping" }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await r.text();
+    if (!r.ok) {
+      return await writeStatus("ai_provider", { ok: false, reason: `${model}: HTTP ${r.status} ${body.slice(0, 160)}` });
+    }
+    return await writeStatus("ai_provider", { ok: true, detail: `${model}, odpowiedź w ${Date.now() - t0} ms` });
+  } catch (e) {
+    return { ok: false, reason: `Dostawca nie odpowiada: ${String((e as Error).message ?? e).slice(0, 140)}` };
+  }
+}
+
+async function integrationsStatus(force = false) {
+  const [unipile, maps, ai] = await Promise.all([checkUnipile(force), checkMaps(force), checkAi(force)]);
+  return { unipile, maps, ai_provider: ai };
+}
+
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
@@ -796,7 +924,12 @@ Deno.serve(async (req) => {
       }
 
       // ── ustawienia globalne (provider AI) ─────────────────────────────
-      // Sprawdzenie klucza Google Places — panel pokazuje wynik przy „Integracje".
+      // Stan wszystkich integracji platformy; force = sprawdź od nowa (po zapisie klucza).
+      case "integrations.status": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        return J({ integrations: await integrationsStatus(!!body.force) });
+      }
+      // Zachowane dla zgodności — pojedyncze sprawdzenie klucza Google.
       case "maps.check": {
         if (!admin) return J({ error: "forbidden" }, 403);
         const { token } = await integrationKey("maps", "GOOGLE_MAPS_KEY");

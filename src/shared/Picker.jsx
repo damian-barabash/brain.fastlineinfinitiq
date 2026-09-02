@@ -1,13 +1,17 @@
 // Wspólny wybór: PRODUKT → workspace → projekt. Ten sam ekran w każdym produkcie.
 // Gdy klient wybierze produkt z innej domeny — przenosimy go tam z sesją (#sso).
 import { useEffect, useState } from 'react'
-import { api, session, gotoProduct } from './platform.js'
+import { useLocation } from 'react-router-dom'
+import { api, session, gotoProduct, takePendingProduct } from './platform.js'
 import { IcFolder, IcBox, IcPlus, IcLogout, IcArrowR, IcBrain, IcHand, IcSpark } from './Icons.jsx'
 
 const SENSE_ICON = { Brain: IcBrain, Hand: IcHand }
 
 export default function Picker({ productKey, onDone }) {
   const user = session.user
+  // Panel woła ten ekran z konkretnym krokiem: przycisk WS ma otwierać wybór
+  // workspace'u, PR — wybór projektu, a produkt zmienia się osobnym przyciskiem.
+  const wanted = useLocation().state?.stage
   const [stage, setStage] = useState('product')
   const [products, setProducts] = useState(null)
   const [workspaces, setWorkspaces] = useState(null)
@@ -19,13 +23,21 @@ export default function Picker({ productKey, onDone }) {
 
   useEffect(() => {
     let alive = true
+    // produkt wybrany jeszcze w poprzedniej domenie (przejście przez #sso)
+    const pending = takePendingProduct()
     api('products.mine')
       .then((d) => {
         if (!alive) return
         const list = d.products ?? []
         setProducts(list)
-        // jeden produkt i to ten, w którym jesteśmy — pomijamy krok
-        if (list.length === 1 && list[0].key === productKey) pickProduct(list[0], true)
+        // klient już wybrał ten produkt (albo ma tylko ten jeden) — nie pytamy drugi raz
+        const here = list.find((p) => p.key === productKey)
+        if (wanted === 'product') return // wprost poproszono o wybór produktu
+        const auto =
+          (wanted && here) || // wejście z panelu: produkt jest już wybrany
+          (pending && list.find((p) => p.key === pending && p.key === productKey)) ||
+          (list.length === 1 && list[0].key === productKey ? list[0] : null)
+        if (auto) pickProduct(auto === true ? here : auto, true)
       })
       .catch((e) => setErr(e.message))
     return () => {
@@ -47,6 +59,11 @@ export default function Picker({ productKey, onDone }) {
       const d = await api('ws.list')
       const list = d.workspaces ?? []
       setWorkspaces(list)
+      // prośba o wybór projektu: workspace jest już znany, przeskakujemy krok
+      if (wanted === 'proj' && session.ws) {
+        const cur = list.find((w) => w.id === session.ws.id)
+        if (cur) return pickWs(cur)
+      }
       if (user?.role !== 'admin' && list.length === 1) pickWs(list[0])
     } catch (e) {
       setErr(e.message)
@@ -144,8 +161,10 @@ export default function Picker({ productKey, onDone }) {
               const Ic = SENSE_ICON[p.sense] ?? IcSpark
               return (
                 <button key={p.key} className="item" onClick={() => pickProduct(p)}>
-                  <span className="row" style={{ gap: 12, alignItems: 'flex-start' }}>
-                    <Ic style={{ color: p.accent || 'var(--acid)', marginTop: 2 }} />
+                  {/* nowrap + flexShrink: przy dłuższym opisie ikona uciekała do
+                      własnej linii i karty produktów wyglądały jak dwa różne wzory */}
+                  <span className="row" style={{ gap: 12, alignItems: 'flex-start', flexWrap: 'nowrap' }}>
+                    <Ic style={{ color: p.accent || 'var(--acid)', marginTop: 2, flexShrink: 0 }} />
                     <span style={{ display: 'grid', gap: 3, textAlign: 'left' }}>
                       <b>{p.name}</b>
                       <span className="muted" style={{ fontSize: 12.5, lineHeight: 1.45 }}>{p.tagline}</span>

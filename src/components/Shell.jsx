@@ -16,6 +16,7 @@ import {
   IcChevL,
   IcChevR,
   IcTarget,
+  IcGlobe,
 } from './Icons.jsx'
 
 const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
@@ -23,6 +24,7 @@ const Advisor = lazy(() => import('../pages/Advisor.jsx'))
 const Sales = lazy(() => import('../pages/Sales.jsx'))
 const Knowledge = lazy(() => import('../pages/Knowledge.jsx'))
 const Settings = lazy(() => import('../pages/Settings.jsx'))
+const Integrations = lazy(() => import('../pages/Integrations.jsx'))
 const AdminPanel = lazy(() => import('../pages/AdminPanel.jsx'))
 
 export default function Shell() {
@@ -32,6 +34,9 @@ export default function Shell() {
   const user = session.user
   const ws = session.ws
   const proj = session.proj
+  // Nazwa produktu pochodzi z rejestru platformy — panel nie może pokazywać
+  // samego „Brain", bo klient z kilkoma produktami widzi wszędzie to samo słowo.
+  const product = session.product ?? { sense: 'Brain', name: 'AI Agents Suite' }
 
   // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
   // może wpuścić do Brain kogoś, komu produkt odebrano.
@@ -60,6 +65,7 @@ export default function Shell() {
       import('../pages/Sales.jsx')
       import('../pages/Knowledge.jsx')
       import('../pages/Settings.jsx')
+      import('../pages/Integrations.jsx')
       if (user?.role === 'admin') import('../pages/AdminPanel.jsx')
       warm('stats', { project_id: proj.id, days: 30, channel_type: undefined })
       warm('kb.list', { project_id: proj.id })
@@ -97,16 +103,20 @@ export default function Shell() {
             <img className="mark-img" src="/favicon-192.png" alt="InfinitiQ" />
             {open && (
               <span className="word">
-                Brain<em>.</em>
+                {product.sense}<em>.</em>
+                <small>{product.name}</small>
               </span>
             )}
           </div>
           {open && (
             <div className="sb-ctx">
-              <button onClick={() => nav('/')} title="Zmień workspace / projekt">
+              <button onClick={() => nav('/', { state: { stage: 'product' } })} title="Zmień produkt">
+                <span className="mono" style={{ letterSpacing: '.08em' }}>PD</span> <b>{product.sense}</b>
+              </button>
+              <button onClick={() => nav('/', { state: { stage: 'ws' } })} title="Zmień workspace">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>WS</span> <b>{ws?.name}</b>
               </button>
-              <button onClick={() => nav('/', { state: { openWs: ws } })} title="Zmień projekt">
+              <button onClick={() => nav('/', { state: { stage: 'proj' } })} title="Zmień projekt">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>PR</span> <b>{proj?.name}</b>
               </button>
             </div>
@@ -120,6 +130,10 @@ export default function Shell() {
             </NavLink>
           ))}
           <div className="sb-sep" />
+          <NavLink to="/app/integrations" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Integracje">
+            <IcGlobe />
+            {open && <span className="lbl">Integracje</span>}
+          </NavLink>
           <NavLink to="/app/settings" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Ustawienia">
             <IcGear />
             {open && <span className="lbl">Ustawienia</span>}
@@ -153,6 +167,7 @@ export default function Shell() {
             <Route path="advisor" element={<Advisor />} />
             <Route path="sales" element={<Sales />} />
             <Route path="knowledge" element={<Knowledge />} />
+            <Route path="integrations" element={<Integrations />} />
             <Route path="settings" element={<Settings />} />
             {user?.role === 'admin' && <Route path="admin" element={<AdminPanel />} />}
             <Route path="*" element={<Navigate to="dashboard" replace />} />

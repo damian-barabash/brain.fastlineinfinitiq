@@ -1,7 +1,13 @@
 // Własny zestaw ikon SVG (stroke 24×24). Żadnych emoji.
+// Domyślny rozmiar jest tutaj, a nie w CSS: ikona wstawiona bez klasy (np. w
+// nagłówku karty) rozciągała się na całą szerokość rodzica. Atrybuty przegrywają
+// z regułami CSS (.btn svg, .sb-item svg), więc nic wcześniejszego się nie zmienia,
+// a wywołanie nadal może podać własny width/height.
 const I = ({ children, ...p }) => (
   <svg
     viewBox="0 0 24 24"
+    width="18"
+    height="18"
     fill="none"
     stroke="currentColor"
     strokeWidth="1.8"

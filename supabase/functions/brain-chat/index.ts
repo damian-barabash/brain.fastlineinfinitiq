@@ -274,7 +274,9 @@ function providerConfig(ai: AiCfg) {
   if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
   if (baseUrl && !baseUrl.endsWith("/v1")) baseUrl += "/v1";
   const secretName = (ai.key_secret || "BRAIN_AI_KEY").trim();
-  const apiKey = Deno.env.get(secretName) || "";
+  // klucz wklejony w panelu ma pierwszeństwo nad sekretem Supabase — inaczej
+  // zmiana dostawcy wymagałaby wejścia do konsoli Supabase i redeployu
+  const apiKey = (ai.api_key || "").trim() || Deno.env.get(secretName) || "";
   // diagnostyka: bez tego brak sekretu wygląda dokładnie jak padnięty dostawca
   if (!baseUrl) console.error("AI config: brak base_url (panel i BARABASH_AI_URL puste)");
   if (!apiKey) console.error("AI config: brak sekretu o nazwie", secretName);
