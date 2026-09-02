@@ -18,6 +18,7 @@ import {
   IcTarget,
   IcGlobe,
 } from './Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
 const Advisor = lazy(() => import('../pages/Advisor.jsx'))
@@ -104,14 +105,13 @@ export default function Shell() {
             {open && (
               <span className="word">
                 {product.sense}<em>.</em>
-                <small>{product.name}</small>
               </span>
             )}
           </div>
           {open && (
             <div className="sb-ctx">
               <button onClick={() => nav('/', { state: { stage: 'product' } })} title="Zmień produkt">
-                <span className="mono" style={{ letterSpacing: '.08em' }}>PD</span> <b>{product.sense}</b>
+                <span className="mono" style={{ letterSpacing: '.08em' }}>PD</span> <b>{product.name}</b>
               </button>
               <button onClick={() => nav('/', { state: { stage: 'ws' } })} title="Zmień workspace">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>WS</span> <b>{ws?.name}</b>
@@ -161,7 +161,7 @@ export default function Shell() {
         </div>
       </aside>
       <main className="main">
-        <Suspense fallback={null}>
+        <Suspense fallback={<SkelPage stats={4} cards={2} />}>
           <Routes>
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="advisor" element={<Advisor />} />

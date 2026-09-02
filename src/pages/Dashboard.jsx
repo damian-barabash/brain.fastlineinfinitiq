@@ -18,6 +18,7 @@ import {
   IcSend,
   IcMsg,
 } from '../components/Icons.jsx'
+import { SkelStats, SkelChart, SkelText } from '../shared/Skeleton.jsx'
 
 const SAVED_MIN_PER_REPLY = 2 // minuty pracy człowieka na jedną odpowiedź
 const CHANNELS = [
@@ -146,7 +147,16 @@ export default function Dashboard() {
       </div>
 
       {tab === 'sales' && <SalesStats projId={proj.id} days={days} />}
-      {tab !== 'sales' && !S && <p className="muted">Ładowanie danych…</p>}
+      {tab !== 'sales' && !S && (
+        <>
+          <SkelStats n={8} />
+          <div className="spacer" />
+          <div className="grid gch">
+            <SkelChart />
+            <SkelChart />
+          </div>
+        </>
+      )}
       {S && tab === 'overview' && <Overview S={S} />}
       {S && tab === 'convs' && <Conversations S={S} projId={proj.id} refetch={refresh} />}
       {S && tab === 'costs' && <Costs S={S} wage={wage} setWage={setWage} />}
@@ -265,7 +275,7 @@ function SalesStats({ projId, days }) {
     }
   }, [data, days])
 
-  if (!S) return <p className="muted">Ładowanie danych…</p>
+  if (!S) return <SkelStats n={6} />
   return (
     <>
       <div className="grid g4">
@@ -387,7 +397,7 @@ function Conversations({ S, refetch }) {
             </span>
           </div>
           <div className="chat-msgs" style={{ padding: 0 }}>
-            {msgs === null && <p className="muted">Ładowanie…</p>}
+            {msgs === null && <SkelText lines={4} />}
             {msgs?.map((m) => (
               <div key={m.id} className={`msg ${m.role === 'user' ? 'user' : 'ai'}`}>
                 {m.content}

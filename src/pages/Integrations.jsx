@@ -13,6 +13,7 @@ import {
   IcKey,
   IcWhatsApp,
 } from '../components/Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 export default function IntegrationsPage() {
   const proj = session.proj
@@ -27,7 +28,7 @@ export default function IntegrationsPage() {
             {proj.name} // kanały
           </div>
           <h1>Integracje</h1>
-          <p className="sub">Kanaly, w których pracuje AI Doradca.</p>
+          <p className="sub">Kanały, w których pracuje AI Doradca.</p>
         </div>
       </div>
       <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />
@@ -87,7 +88,7 @@ function Integrations({ projId, channels, refreshChannels }) {
     setTimeout(() => setSavedW(false), 1600)
   }
 
-  if (!channels) return <p className="muted">Ładowanie…</p>
+  if (!channels) return <SkelPage head={false} cards={3} />
   const WIDGET_V = 2 // podbijać przy każdej zmianie public/widget.js
   const embed = widget
     ? `<script src="${PANEL_ORIGIN}/widget.js?v=${WIDGET_V}" data-key="${widget.public_key}" data-color="${color}"${iconColor ? ` data-icon="${iconColor}"` : ''} data-bg="${winBg}" data-position="${position}" async></script>`

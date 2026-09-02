@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './platform.js'
 import { IcThumbUp, IcEdit, IcTrash, IcCheck, IcPlus } from './Icons.jsx'
+import { SkelList } from './Skeleton.jsx'
 
 const LESSON_STATUS = {
   approved: { label: 'Działa', cls: 'acid', hint: 'Doradca stosuje tę wskazówkę w każdej odpowiedzi.' },
@@ -138,7 +139,7 @@ export default function Lessons({ projId, scope = 'advisor', title, hint }) {
               </button>
             </div>
           )}
-          {rows === null && <p className="muted" style={{ marginTop: 12 }}>Ładowanie…</p>}
+          {rows === null && <SkelList rows={3} />}
           {rows && !rows.length && (
             <p className="muted" style={{ marginTop: 12 }}>
               Jeszcze nic. Oceń odpowiedź kciukiem w dół w teście rozmowy albo dopisz wskazówkę ręcznie.

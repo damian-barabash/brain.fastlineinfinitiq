@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { api, session, gotoProduct, takePendingProduct } from './platform.js'
 import { IcFolder, IcBox, IcPlus, IcLogout, IcArrowR, IcBrain, IcHand, IcSpark } from './Icons.jsx'
+import { SkelList } from './Skeleton.jsx'
 
 const SENSE_ICON = { Brain: IcBrain, Hand: IcHand }
 
@@ -148,7 +149,7 @@ export default function Picker({ productKey, onDone }) {
 
         {stage === 'product' && (
           <div className="picker-list">
-            {products === null && <p className="muted">Ładowanie…</p>}
+            {products === null && <SkelList rows={2} />}
             {products?.length === 0 && (
               <div className="empty" style={{ padding: '18px 4px' }}>
                 <p style={{ marginBottom: 6 }}>Nie masz jeszcze przypisanego żadnego produktu.</p>
@@ -183,7 +184,7 @@ export default function Picker({ productKey, onDone }) {
         {stage === 'ws' && (
           <>
             <div className="picker-list">
-              {workspaces === null && <p className="muted">Ładowanie…</p>}
+              {workspaces === null && <SkelList rows={2} />}
               {workspaces?.map((w) => (
                 <button key={w.id} className="item" onClick={() => pickWs(w)}>
                   <span className="row" style={{ gap: 10 }}>
@@ -220,7 +221,7 @@ export default function Picker({ productKey, onDone }) {
         {stage === 'proj' && (
           <>
             <div className="picker-list">
-              {projects === null && <p className="muted">Ładowanie…</p>}
+              {projects === null && <SkelList rows={3} />}
               {projects?.map((p) => (
                 <button key={p.id} className="item" onClick={() => choose(p)}>
                   <span className="row" style={{ gap: 10 }}>

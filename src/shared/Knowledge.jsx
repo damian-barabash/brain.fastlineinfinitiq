@@ -16,13 +16,14 @@ import {
   IcX,
   IcCheck,
 } from './Icons.jsx'
+import { SkelPage } from './Skeleton.jsx'
 
 export default function Knowledge() {
   const proj = session.proj
   const [data, load] = useCached('kb.list', { project_id: proj.id })
   const [modal, setModal] = useState(null) // {kind:'item', productId} | {kind:'product', product?}
 
-  if (!data) return <p className="muted">Ładowanie…</p>
+  if (!data) return <SkelPage cards={2} />
   const products = data.products
   const items = data.items
   const firmItems = items.filter((i) => !i.product_id)

@@ -16,6 +16,7 @@ import {
   IcKey,
   IcGlobe,
 } from '../components/Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const TONES = ['Profesjonalny', 'Przyjazny', 'Ekspercki', 'Energiczny', 'Spokojny i rzeczowy']
 
@@ -87,7 +88,7 @@ function Archetype({ projId }) {
     }
   }
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) return <SkelPage head={false} cards={2} />
   return (
     <div className="grid g2">
       <div className="card">

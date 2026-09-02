@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { api } from './platform.js'
 import IntegrationsAdmin from './IntegrationsAdmin.jsx'
 import { IcPlus, IcTrash, IcKey, IcCheck, IcUsers, IcFolder, IcSpark, IcBox, IcLinkedIn, IcRefresh, IcMap } from './Icons.jsx'
+import { SkelList, SkelCard } from './Skeleton.jsx'
 
 export default function AdminPanel() {
   const [tab, setTab] = useState('users')
@@ -86,7 +87,7 @@ function Users() {
   }
   const wsName = (id) => wss.find((w) => w.id === id)?.name || '—'
 
-  if (!users) return <p className="muted">Ładowanie…</p>
+  if (!users) return <SkelList rows={5} />
   return (
     <>
       <div className="row" style={{ marginBottom: 14 }}>
@@ -237,7 +238,7 @@ function Workspaces() {
     load()
   }
 
-  if (!wss) return <p className="muted">Ładowanie…</p>
+  if (!wss) return <SkelList rows={3} />
   return (
     <div className="grid g3">
       {wss.map((w) => (
@@ -317,7 +318,7 @@ function UserProjects({ user, onClose }) {
           Nic nie zaznaczone = klient widzi wszystkie projekty swojego workspace'u. Zaznaczenie zawęża dostęp
           do wybranych — działa we wszystkich produktach naraz.
         </p>
-        {projects === null && <p className="muted">Ładowanie…</p>}
+        {projects === null && <SkelList rows={3} />}
         <div className="picker-list" style={{ maxHeight: 260, overflowY: 'auto' }}>
           {projects?.map((p) => {
             const on = checked.includes(p.id)
@@ -361,7 +362,7 @@ function Products() {
     load()
   }
 
-  if (!rows) return <p className="muted">Ładowanie…</p>
+  if (!rows) return <SkelList rows={4} />
   return (
     <>
       <div className="row" style={{ marginBottom: 14 }}>

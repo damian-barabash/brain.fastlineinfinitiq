@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './platform.js'
 import { IcSpark, IcLinkedIn, IcMap, IcCheck, IcRefresh } from './Icons.jsx'
+import { SkelCard } from './Skeleton.jsx'
 
 const CARDS = [
   {
@@ -97,7 +98,15 @@ export default function IntegrationsAdmin() {
     }
   }
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) {
+    return (
+      <div className="grid g2">
+        <SkelCard lines={6} />
+        <SkelCard lines={4} />
+        <SkelCard lines={3} />
+      </div>
+    )
+  }
   const set = (key, field) => (e) => setCfg((c) => ({ ...c, [key]: { ...c[key], [field]: e.target.value } }))
   const num = (key, field) => (e) => setCfg((c) => ({ ...c, [key]: { ...c[key], [field]: Number(e.target.value) } }))
 

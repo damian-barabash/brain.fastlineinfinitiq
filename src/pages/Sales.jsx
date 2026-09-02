@@ -23,6 +23,7 @@ import {
   IcHandoff,
   IcKey,
 } from '../components/Icons.jsx'
+import { SkelPage, SkelList, SkelText } from '../shared/Skeleton.jsx'
 
 const STATUS = {
   new: ['Nowy', 'badge'],
@@ -201,7 +202,7 @@ function SettingsTab({ projId, cfgData, refreshCfg }) {
     }
   }
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) return <SkelPage head={false} cards={2} />
   const hours = cfg.hours || {}
   const days = hours.days?.length ? hours.days : [1, 2, 3, 4, 5]
   const productIds = cfg.product_ids || []
@@ -384,7 +385,7 @@ function Channels({ projId, cfgData, refreshCfg }) {
     if (cfgData && !dirty.current) setCfg(cfgData.config || {})
   }, [cfgData])
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) return <SkelPage head={false} cards={2} />
   const email = cfg.email || {}
   const wa = cfg.whatsapp || {}
   const voice = cfg.voice || {}
@@ -693,7 +694,7 @@ function Leads({ projId, hookKey }) {
     if (data) setLeads(data.leads)
   }, [data])
 
-  if (!leads) return <p className="muted">Ładowanie…</p>
+  if (!leads) return <SkelList rows={5} />
   const shown = leads.filter((l) => {
     if (filter && l.status !== filter) return false
     if (search) {
@@ -963,7 +964,7 @@ function LeadPanel({ lead, hookKey, onClose, onChanged }) {
         </div>
       )}
       <div style={{ overflowY: 'auto', display: 'grid', gap: 8, flex: 1, minHeight: 120 }}>
-        {msgs === null && <p className="muted">Ładowanie historii…</p>}
+        {msgs === null && <SkelText lines={4} />}
         {msgs?.length === 0 && <p className="muted">Brak korespondencji. „Podgląd" pokaże pierwszą wiadomość, „Wyślij teraz" — wyśle ją.</p>}
         {msgs?.map((m) => (
           <div key={m.id} className="lm" data-dir={m.direction}>
