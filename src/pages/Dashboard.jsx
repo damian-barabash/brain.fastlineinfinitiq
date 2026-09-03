@@ -5,6 +5,7 @@ import { useCached } from '../lib/useCached.js'
 import { LineChart, Bars, Donut, StatCard } from '../components/Charts.jsx'
 import {
   IcClock,
+  IcTrash,
   IcChat,
   IcText,
   IcCheck,
@@ -334,6 +335,8 @@ const SAVED_MIN_LABEL = SAVED_MIN_PER_REPLY
 function Conversations({ S, refetch }) {
   const [sel, setSel] = useState(null)
   const [msgs, setMsgs] = useState(null)
+  const [checked, setChecked] = useState(() => new Set())
+  const [busy, setBusy] = useState(false)
 
   async function openConv(c) {
     setSel(c)
@@ -346,6 +349,34 @@ function Conversations({ S, refetch }) {
     setSel(null)
     refetch()
   }
+  // Usuwanie rozmów — testowych i każdych innych. Potwierdzenie, bo to nieodwracalne:
+  // wiadomości znikają kaskadą, statystyki przeliczają się po odświeżeniu.
+  async function removeConvs(ids) {
+    ids = ids.filter(Boolean)
+    if (!ids.length) return
+    const q = ids.length === 1 ? 'Usunąć tę rozmowę razem z wiadomościami? Tego nie da się cofnąć.' : `Usunąć ${ids.length} rozmów razem z wiadomościami? Tego nie da się cofnąć.`
+    if (!window.confirm(q)) return
+    setBusy(true)
+    try {
+      await api('conv.delete', { conversation_ids: ids })
+      if (sel && ids.includes(sel.id)) setSel(null)
+      setChecked(new Set())
+      refetch()
+    } finally {
+      setBusy(false)
+    }
+  }
+  function toggle(id) {
+    setChecked((prev) => {
+      const n = new Set(prev)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+  }
+  const allChecked = S.convs.length > 0 && S.convs.every((c) => checked.has(c.id))
+  function toggleAll() {
+    setChecked(allChecked ? new Set() : new Set(S.convs.map((c) => c.id)))
+  }
 
   const badge = (s) =>
     s === 'closed' ? <span className="badge ok">Zakończona</span> : s === 'redirected' ? <span className="badge warn">Przekazana</span> : <span className="badge acid">Otwarta</span>
@@ -353,27 +384,50 @@ function Conversations({ S, refetch }) {
   return (
     <div className="grid" style={{ gridTemplateColumns: sel ? 'minmax(300px,1fr) minmax(320px,1.2fr)' : '1fr' }}>
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        {checked.size > 0 && (
+          <div className="row" style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)', gap: 10 }}>
+            <span className="mono" style={{ fontSize: 11 }}>Zaznaczone: {checked.size}</span>
+            <span className="right row" style={{ gap: 8 }}>
+              <button className="btn sm" onClick={() => setChecked(new Set())} disabled={busy}>Odznacz</button>
+              <button className="btn sm danger" onClick={() => removeConvs([...checked])} disabled={busy}>
+                <IcTrash /> Usuń zaznaczone
+              </button>
+            </span>
+          </div>
+        )}
         <table className="tbl">
           <thead>
             <tr>
+              <th style={{ width: 34 }}>
+                <input type="checkbox" checked={allChecked} onChange={toggleAll} aria-label="Zaznacz wszystkie" disabled={!S.convs.length} />
+              </th>
               <th>Start</th>
               <th>Kanał</th>
               <th>Gość</th>
               <th>Status</th>
+              <th style={{ width: 44 }} />
             </tr>
           </thead>
           <tbody>
             {S.convs.map((c) => (
-              <tr key={c.id} onClick={() => openConv(c)} style={{ cursor: 'pointer' }}>
+              <tr key={c.id} onClick={() => openConv(c)} style={{ cursor: 'pointer' }} className={sel?.id === c.id ? 'on' : ''}>
+                <td onClick={(e) => e.stopPropagation()}>
+                  <input type="checkbox" checked={checked.has(c.id)} onChange={() => toggle(c.id)} aria-label="Zaznacz rozmowę" />
+                </td>
                 <td>{new Date(c.started_at).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })}</td>
                 <td className="mono" style={{ fontSize: 10.5 }}>{c.channel_type}</td>
                 <td className="mono" style={{ fontSize: 10.5 }}>{c.visitor_id?.slice(0, 14) || '—'}</td>
                 <td>{badge(c.status)}</td>
+                <td onClick={(e) => e.stopPropagation()}>
+                  <button className="btn sm icon" title="Usuń rozmowę" aria-label="Usuń rozmowę" onClick={() => removeConvs([c.id])} disabled={busy}>
+                    <IcTrash />
+                  </button>
+                </td>
               </tr>
             ))}
             {!S.convs.length && (
               <tr>
-                <td colSpan={4} className="muted" style={{ padding: 24 }}>
+                <td colSpan={6} className="muted" style={{ padding: 24 }}>
                   Brak konwersacji w wybranym okresie.
                 </td>
               </tr>
@@ -391,6 +445,9 @@ function Conversations({ S, refetch }) {
                   <IcCheck /> Zamknij
                 </button>
               )}
+              <button className="btn sm danger" onClick={() => removeConvs([sel.id])} disabled={busy} title="Usuń rozmowę">
+                <IcTrash /> Usuń
+              </button>
               <button className="btn sm" onClick={() => setSel(null)}>
                 <IcX />
               </button>

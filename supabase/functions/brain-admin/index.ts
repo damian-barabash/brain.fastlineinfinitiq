@@ -1117,6 +1117,21 @@ Deno.serve(async (req) => {
         return J({ ok: true });
       }
 
+      case "conv.delete": {
+        // Usuwanie rozmów (np. testowych) z zakładki Konwersacje: jedna albo wiele naraz.
+        // brain_messages lecą kaskadą (FK ON DELETE CASCADE), brain_events/brain_feedback
+        // dostają NULL w conversation_id — statystyki liczone z rozmów po prostu je pominą.
+        const ids = (Array.isArray(body.conversation_ids) ? body.conversation_ids : [body.conversation_id])
+          .map((x) => String(x || "").trim()).filter(Boolean).slice(0, 500);
+        if (!ids.length) return J({ error: "brak conversation_id" }, 400);
+        const { data: rows } = await db.from("brain_conversations").select("id, project_id").in("id", ids);
+        if (!rows?.length) return J({ error: "not found" }, 404);
+        for (const pid of new Set(rows.map((r) => String(r.project_id)))) await assertProject(user, pid);
+        const { error } = await db.from("brain_conversations").delete().in("id", rows.map((r) => r.id));
+        if (error) return J({ error: error.message }, 500);
+        return J({ ok: true, deleted: rows.length });
+      }
+
       case "stats": {
         const pid = String(body.project_id || "");
         await assertProject(user, pid);
@@ -1126,7 +1141,7 @@ Deno.serve(async (req) => {
 
         let cq = db
           .from("brain_conversations")
-          .select("id, channel_type, status, started_at, last_at")
+          .select("id, channel_type, status, started_at, last_at, visitor_id") // visitor_id: kolumna „Gość" w panelu była zawsze pusta bez niego
           .eq("project_id", pid)
           .gte("started_at", since);
         if (chFilter) cq = cq.eq("channel_type", chFilter);
