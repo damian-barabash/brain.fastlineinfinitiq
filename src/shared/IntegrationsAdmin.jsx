@@ -16,7 +16,7 @@ const CARDS = [
     title: 'Model AI (DeepSeek, Barabash, dowolny OpenAI-compatible)',
     where: null,
     desc:
-      'Z tego modelu korzysta wszystko: doradca, sprzedawca i LeadEngine. Zmiana działa od następnej wiadomości, bez wgrywania czegokolwiek.',
+      'Z tego modelu korzysta wszystko: doradca, sprzedawca i Lead Engine. Zmiana działa od następnej wiadomości, bez wgrywania czegokolwiek.',
   },
   {
     key: 'unipile',
@@ -24,7 +24,7 @@ const CARDS = [
     title: 'Unipile — LinkedIn',
     where: 'https://dashboard.unipile.com',
     desc:
-      'Jeden token na całą platformę. Konta LinkedIn podpinasz po stronie Unipile, a z którego konta szuka dany projekt — wybierasz w LeadEngine → Integracje.',
+      'Jeden token na całą platformę. Konta LinkedIn podpinasz po stronie Unipile, a z którego konta szuka dany projekt — wybierasz w Lead Engine → Integracje.',
   },
   {
     key: 'maps',

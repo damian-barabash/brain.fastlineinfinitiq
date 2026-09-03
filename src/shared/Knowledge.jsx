@@ -1,6 +1,6 @@
 // Baza wiedzy: dane firmy (ogólne) + produkty (każdy z własną wiedzą i opiekunem sprzedaży).
 // WSPÓLNA dla wszystkich produktów platformy — ten sam projekt widzi tę samą wiedzę
-// w Brain i w Hand, a LeadEngine układa z niej pierwszą wiadomość do leada.
+// w Brain i w Hand, a Lead Engine układa z niej pierwszą wiadomość do leada.
 import { useState } from 'react'
 import { api, session } from './platform.js'
 import { useCached } from './useCached.js'

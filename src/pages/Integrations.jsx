@@ -1,6 +1,6 @@
 // Integracje doradcy: gdzie AI odbiera wiadomości — widget na stronie,
 // WhatsApp, Instagram, Messenger. Osobna sekcja w menu (tak samo jak w
-// LeadEngine), żeby podłączanie kanałów nie chowało się w zakładce archetypu.
+// Lead Engine), żeby podłączanie kanałów nie chowało się w zakładce archetypu.
 import { useState, useEffect, useRef } from 'react'
 import { FN_BASE, PANEL_ORIGIN, api, session } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'

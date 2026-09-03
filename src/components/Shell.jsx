@@ -37,7 +37,7 @@ export default function Shell() {
   const proj = session.proj
   // Nazwa produktu pochodzi z rejestru platformy — panel nie może pokazywać
   // samego „Brain", bo klient z kilkoma produktami widzi wszędzie to samo słowo.
-  const product = session.product ?? { sense: 'Brain', name: 'AI Agents Suite' }
+  const product = session.product ?? { sense: 'Brain', name: 'Agenci AI' }
 
   // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
   // może wpuścić do Brain kogoś, komu produkt odebrano.
