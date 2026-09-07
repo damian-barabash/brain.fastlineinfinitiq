@@ -149,7 +149,7 @@ const READ_ACTIONS = new Set([
   'products.list',
   'ws.products',
   'user.projects',
-  // Lead Engine (hand-api ma własny klient, ale współdzieli reguły cache)
+  // AI Łowca Leadów (hand-api ma własny klient, ale współdzieli reguły cache)
   'hand.config',
   'hand.leads',
   'hand.lead',

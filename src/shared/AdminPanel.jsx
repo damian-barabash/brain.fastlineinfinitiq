@@ -399,7 +399,7 @@ function Products() {
               </label>
               <label className="f">
                 <span className="mono">Nazwa</span>
-                <input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="Lead Engine" />
+                <input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="AI Łowca Leadów" />
               </label>
             </div>
             <label className="f">
