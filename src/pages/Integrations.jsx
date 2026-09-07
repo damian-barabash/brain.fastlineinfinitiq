@@ -197,8 +197,9 @@ function Integrations({ projId, channels, refreshChannels }) {
       <h2 style={{ fontSize: 16, marginBottom: 6 }}>Kanały API — Meta</h2>
       <p className="muted" style={{ marginBottom: 14 }}>
         Webhook jest gotowy i wspólny dla wszystkich kanałów: <code className="mono">{FN_BASE}/brain-hook</code>.
-        Podłącz aplikację Meta Business, wklej tokeny — doradca zacznie odpowiadać w tych kanałach.{' '}
-        <span className="badge warn" style={{ verticalAlign: 'middle' }}>Test na żywo — następny etap</span>
+        Podłącz aplikację Meta Business, wklej tokeny — doradca zacznie odpowiadać w tych kanałach.
+        Token weryfikacji wpisujesz w Meta <b>raz dla całej aplikacji</b> (przy pierwszej subskrypcji webhooka),
+        a tokeny stron podajesz osobno dla każdego kanału.
       </p>
       <div className="grid g3">
         <MetaChannel
@@ -213,10 +214,11 @@ function Integrations({ projId, channels, refreshChannels }) {
             ['page_token', 'Page Access Token'],
           ]}
           steps={[
-            'developers.facebook.com → utwórz aplikację typu Business.',
-            'Dodaj produkt „Messenger" i połącz stronę firmy.',
-            'Wygeneruj Page Access Token i wklej powyżej.',
-            'W sekcji Webhooks podaj URL webhooka i token weryfikacji, subskrybuj pole „messages".',
+            'Meta → Twoja aplikacja → Przypadki użycia (Use cases) → „Messenger / Komunikacja z klientami" → Konfiguruj.',
+            'W sekcji uprawnień dodaj: pages_messaging, pages_manage_metadata, pages_show_list.',
+            'Webhooks: Callback URL = adres wyżej, Verify Token = token z tej karty (skopiuj przyciskiem). Subskrybuj pola messages i messaging_postbacks.',
+            'Połącz stronę firmową i wygeneruj Page Access Token (przycisk „Generate token"). Wklej token i ID strony powyżej → Zapisz.',
+            'Tryb deweloperski = bot odpowiada tylko administratorom i testerom aplikacji. Do klientów: opublikuj aplikację i przejdź App Review dla pages_messaging.',
           ]}
         />
         <MetaChannel
@@ -232,10 +234,11 @@ function Integrations({ projId, channels, refreshChannels }) {
             ['page_token', 'Page Access Token'],
           ]}
           steps={[
-            'Konto Instagram musi być firmowe i połączone ze stroną FB.',
-            'W aplikacji Meta dodaj produkt „Instagram" (Messaging).',
-            'Użyj tokenu strony FB powiązanej z kontem.',
-            'W Webhooks subskrybuj obiekt „instagram", pole „messages".',
+            'Konto Instagram musi być profesjonalne i połączone ze stroną FB. W aplikacji Instagram: Ustawienia → Wiadomości → Połączone narzędzia (Connected tools) — włącz.',
+            'Meta → Przypadki użycia → „Instagram messaging" (Messenger API for Instagram, czyli wariant ze stroną FB) → Konfiguruj.',
+            'Uprawnienia: instagram_basic, instagram_manage_messages, pages_manage_metadata.',
+            'Webhooks: obiekt „instagram", pole messages. Callback URL i Verify Token — te same co w Messengerze.',
+            'Wklej ID konta Instagram, ID powiązanej strony i ten sam Page Access Token → Zapisz.',
           ]}
         />
         <MetaChannel
@@ -250,14 +253,31 @@ function Integrations({ projId, channels, refreshChannels }) {
             ['wa_token', 'Token dostępu (WhatsApp Cloud API)'],
           ]}
           steps={[
-            'W aplikacji Meta dodaj produkt „WhatsApp" (Cloud API).',
-            'Skopiuj Phone Number ID z panelu WhatsApp → API Setup.',
-            'Wygeneruj stały token (System User) i wklej powyżej.',
-            'W Webhooks podaj URL webhooka i token weryfikacji, subskrybuj „messages".',
+            'Meta → Przypadki użycia → WhatsApp (Cloud API) → Konfiguruj.',
+            'Phone Number ID skopiuj z zakładki API Setup.',
+            'Stały token: Ustawienia firmy → Użytkownicy systemowi → wygeneruj token z uprawnieniem whatsapp_business_messaging.',
+            'Webhooks: obiekt „whatsapp_business_account", pole messages; Callback URL i Verify Token jak wyżej.',
+            'Pierwsza wiadomość poza oknem 24 h wymaga zatwierdzonego szablonu Meta.',
           ]}
         />
       </div>
     </>
+  )
+}
+
+function CopyRow({ value, label = 'Kopiuj' }) {
+  const [ok, setOk] = useState(false)
+  return (
+    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+      <code className="mono" style={{ fontSize: 11.5, overflowWrap: 'anywhere', flex: 1 }}>{value || '—'}</code>
+      <button
+        className="btn sm"
+        disabled={!value}
+        onClick={() => { navigator.clipboard.writeText(value); setOk(true); setTimeout(() => setOk(false), 1500) }}
+      >
+        {ok ? <IcCheck /> : <IcCopy />} {ok ? 'Skopiowano' : label}
+      </button>
+    </div>
   )
 }
 
@@ -272,6 +292,14 @@ function MetaChannel({ projId, channels, refreshChannels, type, icon, title, fie
   useEffect(() => {
     if (!dirty.current) setCfg(existing?.config || {})
   }, [existing?.id, cfgKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Token weryfikacji trzeba wkleić w Meta ZANIM cokolwiek zapiszemy (Meta od razu
+  // uderza w webhooka), więc generujemy go przy otwarciu karty, a nie przy zapisie.
+  useEffect(() => {
+    if (open && !cfg.verify_token) {
+      setCfg((c) => ({ ...c, verify_token: crypto.randomUUID().replaceAll('-', '').slice(0, 24) }))
+    }
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function save() {
     const config = { ...cfg }
@@ -301,6 +329,10 @@ function MetaChannel({ projId, channels, refreshChannels, type, icon, title, fie
         </button>
       ) : (
         <>
+          <div className="note" style={{ marginBottom: 12 }}>
+            <div className="mono" style={{ marginBottom: 4 }}>Callback URL (wklej w Meta)</div>
+            <CopyRow value={`${FN_BASE}/brain-hook`} />
+          </div>
           {fields.map(([k, label]) => (
             <label className="f" key={k}>
               <span className="mono">{label}</span>
@@ -308,11 +340,22 @@ function MetaChannel({ projId, channels, refreshChannels, type, icon, title, fie
             </label>
           ))}
           <label className="f">
-            <span className="mono">Token weryfikacji webhooka</span>
+            <span className="mono">Token weryfikacji webhooka (Verify Token)</span>
             <input
               value={cfg.verify_token || ''}
               onChange={(e) => { dirty.current = true; setCfg((c) => ({ ...c, verify_token: e.target.value })) }}
-              placeholder="zostanie wygenerowany przy zapisie"
+              placeholder="generowany automatycznie"
+            />
+          </label>
+          <div style={{ marginBottom: 12 }}>
+            <CopyRow value={cfg.verify_token || ''} label="Kopiuj token" />
+          </div>
+          <label className="f">
+            <span className="mono">App Secret (opcjonalnie — włącza weryfikację podpisu Meta)</span>
+            <input
+              value={cfg.app_secret || ''}
+              onChange={(e) => { dirty.current = true; setCfg((c) => ({ ...c, app_secret: e.target.value })) }}
+              placeholder="Ustawienia aplikacji → Podstawowe → Klucz aplikacji"
             />
           </label>
           <div className="row" style={{ marginBottom: 12 }}>
