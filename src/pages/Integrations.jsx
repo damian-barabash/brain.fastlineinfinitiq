@@ -1,6 +1,8 @@
-// Integracje doradcy: gdzie AI odbiera wiadomości — widget na stronie,
-// WhatsApp, Instagram, Messenger. Osobna sekcja w menu (tak samo jak w
-// AI Łowca Leadów), żeby podłączanie kanałów nie chowało się w zakładce archetypu.
+// Wszystkie integracje produktu w jednym miejscu:
+//  1) kanały doradcy — widget na stronie, WhatsApp, Instagram, Messenger,
+//  2) kanały sprzedawcy — Resend, WhatsApp Cloud, telefon (ElevenLabs).
+// Klucze wspólne dla całej platformy (model AI, Unipile, Google Places) NIE są tutaj —
+// ustawia je administrator w Admin → Integracje, raz dla wszystkich produktów.
 import { useState, useEffect, useRef } from 'react'
 import { FN_BASE, PANEL_ORIGIN, api, session } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
@@ -14,10 +16,12 @@ import {
   IcWhatsApp,
 } from '../components/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
+import SalesChannels from '../components/SalesChannels.jsx'
 
 export default function IntegrationsPage() {
   const proj = session.proj
   const [chData, refreshChannels] = useCached('channels.list', { project_id: proj.id })
+  const [cfgData, refreshCfg] = useCached('sales.get', { project_id: proj.id })
   const channels = chData?.channels ?? null
   return (
     <>
@@ -28,10 +32,15 @@ export default function IntegrationsPage() {
             {proj.name} // kanały
           </div>
           <h1>Integracje</h1>
-          <p className="sub">Kanały, w których pracuje AI Doradca.</p>
+          <p className="sub">Wszystkie kanały tego projektu — doradcy i sprzedawcy.</p>
         </div>
       </div>
+
+      <div className="mono" style={{ opacity: 0.62, margin: '2px 0 14px' }}>01 — AI Doradca</div>
       <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />
+
+      <div className="mono" style={{ opacity: 0.62, margin: '30px 0 14px' }}>02 — Sprzedawca</div>
+      <SalesChannels projId={proj.id} cfgData={cfgData} refreshCfg={refreshCfg} />
     </>
   )
 }
