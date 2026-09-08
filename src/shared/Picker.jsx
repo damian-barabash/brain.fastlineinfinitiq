@@ -8,8 +8,13 @@ import { SkelList } from './Skeleton.jsx'
 
 const SENSE_ICON = { Brain: IcBrain, Hand: IcHand }
 
-export default function Picker({ productKey, onDone }) {
+// `productKey` — produkt tej aplikacji. `localKeys` — wszystkie produkty, które ta
+// sama aplikacja obsługuje pod jedną domeną (Brain: AI Doradca i AI Sprzedawca).
+// Wybór produktu z tej listy zostaje na miejscu; każdy inny to przejście domenowe.
+export default function Picker({ productKey, localKeys, onDone }) {
   const user = session.user
+  const local = localKeys?.length ? localKeys : [productKey]
+  const isLocal = (k) => local.includes(k)
   // Panel woła ten ekran z konkretnym krokiem: przycisk WS ma otwierać wybór
   // workspace'u, PR — wybór projektu, a produkt zmienia się osobnym przyciskiem.
   const wanted = useLocation().state?.stage
@@ -32,12 +37,14 @@ export default function Picker({ productKey, onDone }) {
         const list = d.products ?? []
         setProducts(list)
         // klient już wybrał ten produkt (albo ma tylko ten jeden) — nie pytamy drugi raz
-        const here = list.find((p) => p.key === productKey)
+        // produkt tej aplikacji: ten już wybrany, a jak nie ma — pierwszy pasujący
+        const here = list.find((p) => p.key === session.product?.key && isLocal(p.key))
+          || list.find((p) => isLocal(p.key))
         if (wanted === 'product') return // wprost poproszono o wybór produktu
         const auto =
           (wanted && here) || // wejście z panelu: produkt jest już wybrany
-          (pending && list.find((p) => p.key === pending && p.key === productKey)) ||
-          (list.length === 1 && list[0].key === productKey ? list[0] : null)
+          (pending && list.find((p) => p.key === pending && isLocal(p.key))) ||
+          (list.length === 1 && isLocal(list[0].key) ? list[0] : null)
         if (auto) pickProduct(auto === true ? here : auto, true)
       })
       .catch((e) => setErr(e.message))
@@ -48,7 +55,7 @@ export default function Picker({ productKey, onDone }) {
   }, [])
 
   async function pickProduct(p, silent) {
-    if (p.key !== productKey) {
+    if (!isLocal(p.key)) {
       session.setProduct(p)
       gotoProduct(p)
       return
@@ -76,7 +83,9 @@ export default function Picker({ productKey, onDone }) {
     setProjects(null)
     setStage('proj')
     try {
-      const d = await api('proj.list', { workspace_id: w.id })
+      // Projekty bywają przypisane do konkretnych produktów — pokazujemy te,
+      // które należą do wybranego (projekt bez przypisań należy do wszystkich).
+      const d = await api('proj.list', { workspace_id: w.id, product_key: session.product?.key })
       setProjects(d.projects ?? [])
     } catch (e) {
       setErr(e.message)

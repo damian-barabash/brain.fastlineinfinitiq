@@ -43,6 +43,8 @@ export default function Dashboard() {
   const [days, setDays] = useState(30)
   const [channel, setChannel] = useState('')
   const [tab, setTab] = useState('overview')
+  // Statystyki sprzedawcy widzi tylko klient tego produktu (i administrator).
+  const showSales = session.user?.role === 'admin' || session.product?.key === 'sales'
   const [wage, setWage] = useState(45) // zł/h — do porównania kosztów
   const [data, refresh] = useCached('stats', { project_id: proj.id, days, channel_type: channel || undefined })
 
@@ -142,12 +144,14 @@ export default function Dashboard() {
         <button className={tab === 'costs' ? 'on' : ''} onClick={() => setTab('costs')}>
           Porównanie
         </button>
-        <button className={tab === 'sales' ? 'on' : ''} onClick={() => setTab('sales')}>
-          Sprzedawca
-        </button>
+        {showSales && (
+          <button className={tab === 'sales' ? 'on' : ''} onClick={() => setTab('sales')}>
+            AI Sprzedawca
+          </button>
+        )}
       </div>
 
-      {tab === 'sales' && <SalesStats projId={proj.id} days={days} />}
+      {tab === 'sales' && showSales && <SalesStats projId={proj.id} days={days} />}
       {tab !== 'sales' && !S && (
         <>
           <SkelStats n={8} />

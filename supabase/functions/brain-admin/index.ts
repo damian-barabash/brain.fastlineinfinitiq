@@ -392,13 +392,37 @@ Deno.serve(async (req) => {
           .select("id, name, created_at")
           .eq("workspace_id", ws)
           .order("created_at");
-        let projects = data ?? [];
+        // typ jawny: dokładamy `product_keys`, a wnioskowanie z selecta by na to nie pozwoliło
+        type ProjRow = { id: string; name: string; created_at: string; product_keys?: string[] };
+        let projects = (data ?? []) as ProjRow[];
         // klient może być zawężony do wybranych projektów (brain_user_projects);
         // brak wierszy = pełny dostęp do workspace'u, jak dotąd
         if (!admin) {
           const { data: allow } = await db.from("brain_user_projects").select("project_id").eq("user_id", user.id);
           const ids = new Set((allow ?? []).map((r: { project_id: string }) => r.project_id));
-          if (ids.size) projects = projects.filter((p: { id: string }) => ids.has(p.id));
+          if (ids.size) projects = projects.filter((p) => ids.has(p.id));
+        }
+
+        // Przypisanie projektu do produktów: w jednym workspace bywa projekt pod
+        // doradcę i osobny pod sprzedawcę. Projekt BEZ wierszy należy do wszystkich
+        // produktów — inaczej dotychczasowe projekty zniknęłyby po tej zmianie.
+        const projIds = projects.map((p) => p.id);
+        const links: Record<string, string[]> = {};
+        if (projIds.length) {
+          const { data: pp } = await db
+            .from("fiq_project_products").select("project_id, product_key").in("project_id", projIds);
+          for (const r of pp ?? []) {
+            const row = r as { project_id: string; product_key: string };
+            (links[row.project_id] ??= []).push(row.product_key);
+          }
+        }
+        projects = projects.map((p) => ({ ...p, product_keys: links[p.id] ?? [] }));
+
+        // Panel prosi o projekty konkretnego produktu (wybór w Pickerze).
+        const wantKey = String(body.product_key || "");
+        if (wantKey) {
+          projects = projects.filter((p) =>
+            !p.product_keys?.length || p.product_keys.includes(wantKey));
         }
         return J({ projects });
       }
@@ -1029,6 +1053,42 @@ Deno.serve(async (req) => {
         }
         return J({ ok: true });
       }
+      // Przypisanie PROJEKTU do produktów (pusty zestaw = wszystkie produkty
+      // workspace'u). Dzięki temu w jednym workspace mogą stać obok siebie
+      // projekty prowadzone przez różne produkty platformy.
+      case "proj.products": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const ws = String(body.workspace_id || "");
+        let q = db.from("fiq_project_products").select("project_id, product_key");
+        if (ws) {
+          const { data: ps } = await db.from("brain_projects").select("id").eq("workspace_id", ws);
+          const ids = (ps ?? []).map((r: { id: string }) => r.id);
+          if (!ids.length) return J({ map: {} });
+          q = q.in("project_id", ids);
+        }
+        const { data } = await q;
+        const map: Record<string, string[]> = {};
+        for (const r of data ?? []) {
+          const row = r as { project_id: string; product_key: string };
+          (map[row.project_id] ??= []).push(row.product_key);
+        }
+        return J({ map });
+      }
+      case "proj.products.set": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const pid = String(body.project_id || "");
+        const key = String(body.product_key || "");
+        if (!pid || !key) return J({ error: "brak danych" }, 400);
+        if (body.enabled) {
+          const { error } = await db.from("fiq_project_products").upsert({ project_id: pid, product_key: key });
+          if (error) throw error;
+        } else {
+          const { error } = await db.from("fiq_project_products").delete().eq("project_id", pid).eq("product_key", key);
+          if (error) throw error;
+        }
+        return J({ ok: true });
+      }
+
       // ── Unipile: jeden token na całą platformę (jak dostawca AI) ──────
       case "unipile.accounts": {
         if (!admin) return J({ error: "forbidden" }, 403);

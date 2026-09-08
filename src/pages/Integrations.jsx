@@ -23,6 +23,13 @@ export default function IntegrationsPage() {
   const [chData, refreshChannels] = useCached('channels.list', { project_id: proj.id })
   const [cfgData, refreshCfg] = useCached('sales.get', { project_id: proj.id })
   const channels = chData?.channels ?? null
+
+  // Klient widzi kanały tylko wykupionego agenta; administrator — wszystkie,
+  // bo konfiguruje je w imieniu klienta (ta sama zasada co w menu panelu).
+  const both = session.user?.role === 'admin'
+  const productName = session.product?.name ?? 'AI Doradca'
+  const isAdvisor = both || session.product?.key !== 'sales'
+  const isSales = both || session.product?.key === 'sales'
   return (
     <>
       <div className="pagehead">
@@ -32,15 +39,30 @@ export default function IntegrationsPage() {
             {proj.name} // kanały
           </div>
           <h1>Integracje</h1>
-          <p className="sub">Wszystkie kanały tego projektu — doradcy i sprzedawcy.</p>
+          <p className="sub">
+            {both ? 'Wszystkie kanały tego projektu — doradcy i sprzedawcy.'
+                  : `Kanały tego projektu dla produktu ${productName}.`}
+          </p>
         </div>
       </div>
 
-      <div className="mono" style={{ opacity: 0.62, margin: '2px 0 14px' }}>01 — AI Doradca</div>
-      <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />
+      {isAdvisor && (
+        <>
+          <div className="mono" style={{ opacity: 0.62, margin: '2px 0 14px' }}>
+            {both ? '01 — AI Doradca' : 'AI Doradca'}
+          </div>
+          <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />
+        </>
+      )}
 
-      <div className="mono" style={{ opacity: 0.62, margin: '30px 0 14px' }}>02 — Sprzedawca</div>
-      <SalesChannels projId={proj.id} cfgData={cfgData} refreshCfg={refreshCfg} />
+      {isSales && (
+        <>
+          <div className="mono" style={{ opacity: 0.62, margin: isAdvisor ? '30px 0 14px' : '2px 0 14px' }}>
+            {both ? '02 — AI Sprzedawca' : 'AI Sprzedawca'}
+          </div>
+          <SalesChannels projId={proj.id} cfgData={cfgData} refreshCfg={refreshCfg} />
+        </>
+      )}
     </>
   )
 }

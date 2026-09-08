@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useState } from 'react'
 import { api, session, getTheme, setTheme } from '../lib/api.js'
 import { warm } from '../lib/useCached.js'
 import { ensureProductAccess } from '../shared/platform.js'
+import { PRODUCTS, PRODUCT_FALLBACK } from '../lib/products.js'
 import {
   IcDash,
   IcBot,
@@ -35,20 +36,30 @@ export default function Shell() {
   const user = session.user
   const ws = session.ws
   const proj = session.proj
-  // Nazwa produktu pochodzi z rejestru platformy — panel nie może pokazywać
-  // samego „Brain", bo klient z kilkoma produktami widzi wszędzie to samo słowo.
-  const product = session.product ?? { sense: 'Brain', name: 'Agenci AI' }
+  // Ta aplikacja jest domem DWÓCH produktów platformy: AI Doradca i AI Sprzedawca
+  // (dawniej jeden parasol „Agenci AI"). Trzeci agent — AI Asystent — dojdzie,
+  // gdy powstanie jego moduł. Wybór produktu decyduje, którą sekcję widzi klient;
+  // workspace'y, projekty i baza wiedzy zostają wspólne.
+  const [product, setProduct] = useState(session.product ?? PRODUCT_FALLBACK)
+  // Administrator obsługuje oba produkty (konfiguruje je za klienta), klient
+  // widzi wyłącznie tego agenta, którego ma wykupionego.
+  const bothProducts = user?.role === 'admin'
+  const isAdvisor = bothProducts || product.key === 'advisor'
+  const isSales = bothProducts || product.key === 'sales'
 
   // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
   // może wpuścić do Brain kogoś, komu produkt odebrano.
   useEffect(() => {
     let alive = true
-    ensureProductAccess('brain')
-      .then(({ ok }) => {
-        if (alive && !ok) {
+    ensureProductAccess(PRODUCTS)
+      .then(({ ok, product: cur }) => {
+        if (!alive) return
+        if (!ok) {
           session.setProj(null)
           nav('/', { replace: true })
+          return
         }
+        if (cur) setProduct(cur)
       })
       .catch(() => {})
     return () => {
@@ -62,8 +73,8 @@ export default function Shell() {
     const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300))
     idle(() => {
       import('../pages/Dashboard.jsx')
-      import('../pages/Advisor.jsx')
-      import('../pages/Sales.jsx')
+      if (isAdvisor) import('../pages/Advisor.jsx')
+      if (isSales) import('../pages/Sales.jsx')
       import('../pages/Knowledge.jsx')
       import('../pages/Settings.jsx')
       import('../pages/Integrations.jsx')
@@ -71,12 +82,14 @@ export default function Shell() {
       warm('stats', { project_id: proj.id, days: 30, channel_type: undefined })
       warm('kb.list', { project_id: proj.id })
       warm('channels.list', { project_id: proj.id })
-      warm('advisor.get', { project_id: proj.id })
-      warm('sales.get', { project_id: proj.id })
-      warm('leads.list', { project_id: proj.id })
+      if (isAdvisor) warm('advisor.get', { project_id: proj.id })
+      if (isSales) {
+        warm('sales.get', { project_id: proj.id })
+        warm('leads.list', { project_id: proj.id })
+      }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proj.id])
+  }, [proj.id, product.key])
 
   function toggleTheme() {
     const t = theme === 'dark' ? 'light' : 'dark'
@@ -89,12 +102,14 @@ export default function Shell() {
     nav('/login')
   }
 
+  // Klient widzi tylko tego agenta, którego ma wykupionego. Reszta (pulpit,
+  // baza wiedzy, integracje, ustawienia) jest wspólna dla obu produktów.
   const items = [
     { to: '/app/dashboard', label: 'Dashboard', icon: <IcDash /> },
-    { to: '/app/advisor', label: 'AI Doradca', icon: <IcBot /> },
-    { to: '/app/sales', label: 'Sprzedawca', icon: <IcTarget /> },
+    isAdvisor && { to: '/app/advisor', label: 'AI Doradca', icon: <IcBot /> },
+    isSales && { to: '/app/sales', label: 'AI Sprzedawca', icon: <IcTarget /> },
     { to: '/app/knowledge', label: 'Baza wiedzy', icon: <IcBook /> },
-  ]
+  ].filter(Boolean)
 
   return (
     <div className="shell">
@@ -164,8 +179,8 @@ export default function Shell() {
         <Suspense fallback={<SkelPage stats={4} cards={2} />}>
           <Routes>
             <Route path="dashboard" element={<Dashboard />} />
-            <Route path="advisor" element={<Advisor />} />
-            <Route path="sales" element={<Sales />} />
+            <Route path="advisor" element={isAdvisor ? <Advisor /> : <Navigate to="../dashboard" replace />} />
+            <Route path="sales" element={isSales ? <Sales /> : <Navigate to="../dashboard" replace />} />
             <Route path="knowledge" element={<Knowledge />} />
             <Route path="integrations" element={<Integrations />} />
             <Route path="settings" element={<Settings />} />

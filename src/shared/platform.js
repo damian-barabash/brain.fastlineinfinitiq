@@ -149,6 +149,7 @@ const READ_ACTIONS = new Set([
   'products.list',
   'ws.products',
   'user.projects',
+  'proj.products',
   // AI Łowca Leadów (hand-api ma własny klient, ale współdzieli reguły cache)
   'hand.config',
   'hand.leads',
@@ -223,11 +224,17 @@ export async function loadProducts() {
   return d.products ?? []
 }
 
-// Czy klient ma dostęp do TEGO produktu (wywoływane przy starcie aplikacji).
-export async function ensureProductAccess(productKey) {
+// Czy klient ma dostęp do produktu tej aplikacji (wywoływane przy starcie).
+// `keys` może być stringiem albo listą — jedna aplikacja bywa domem kilku produktów
+// (Brain: AI Doradca i AI Sprzedawca), a wtedy liczy się ten wybrany w sesji.
+export async function ensureProductAccess(keys) {
+  const want = Array.isArray(keys) ? keys : [keys]
   const products = await loadProducts()
-  const found = products.find((p) => p.key === productKey)
-  return { ok: !!found, product: found ?? null, products }
+  const mine = products.filter((p) => want.includes(p.key))
+  const chosen = mine.find((p) => p.key === session.product?.key) ?? mine[0] ?? null
+  // sesja mogła trzymać produkt, do którego dostęp odebrano — prostujemy ją tutaj
+  if (chosen && chosen.key !== session.product?.key) session.setProduct(chosen)
+  return { ok: !!chosen, product: chosen, products, mine }
 }
 
 // ── motyw (ciemny/jasny) — wspólny przełącznik dla produktów ────────────────

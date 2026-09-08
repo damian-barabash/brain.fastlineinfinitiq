@@ -269,6 +269,7 @@ function Workspaces() {
               {prods.length === 0 && <span className="muted">Brak produktów w rejestrze.</span>}
             </div>
           </div>
+          <WsProjects ws={w} prods={prods.filter((p) => (map[w.id] ?? []).includes(p.key))} />
           <p className="mono" style={{ marginTop: 10, fontSize: 9.5 }}>
             utworzony {new Date(w.created_at).toLocaleDateString('pl-PL')}
           </p>
@@ -276,8 +277,92 @@ function Workspaces() {
       ))}
       <div className="card muted">
         Nowy workspace tworzysz na ekranie wyboru (po zalogowaniu). Workspace, projekty i baza wiedzy są
-        WSPÓLNE dla wszystkich produktów — klient przypisany do Brain i do Hand pracuje na tych samych danych.
+        WSPÓLNE dla wszystkich produktów — klient przypisany do dwóch produktów pracuje na tych samych danych.
+        Produkty workspace'u decydują, co klient w ogóle widzi; przypisanie projektu zawęża to jeszcze
+        do wybranych produktów.
       </div>
+    </div>
+  )
+}
+
+// Projekty workspace'u i ich produkty. W jednym workspace mogą stać obok siebie
+// projekt prowadzony przez AI Doradcę i projekt AI Sprzedawcy — przy wyborze
+// produktu klient zobaczy tylko te swoje. Projekt BEZ przypisania należy do
+// wszystkich produktów workspace'u (tak działały wszystkie projekty do tej pory,
+// więc nic nie znika po włączeniu tej funkcji).
+function WsProjects({ ws, prods }) {
+  const [open, setOpen] = useState(false)
+  const [projs, setProjs] = useState(null)
+  const [err, setErr] = useState('')
+
+  async function load() {
+    try {
+      const d = await api('proj.list', { workspace_id: ws.id })
+      setProjs(d.projects ?? [])
+    } catch (e) {
+      setErr(e.message)
+    }
+  }
+  useEffect(() => {
+    if (open && projs === null) load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  async function toggle(p, key, on) {
+    setProjs((list) =>
+      list.map((x) =>
+        x.id === p.id
+          ? { ...x, product_keys: on ? [...(x.product_keys ?? []), key] : (x.product_keys ?? []).filter((k) => k !== key) }
+          : x,
+      ),
+    )
+    try {
+      await api('proj.products.set', { project_id: p.id, product_key: key, enabled: on })
+    } catch (e) {
+      alert('Nie udało się zapisać: ' + e.message)
+      load()
+    }
+  }
+
+  return (
+    <div className="f" style={{ marginTop: 12 }}>
+      <button className="btn sm" onClick={() => setOpen(!open)}>
+        {open ? 'Ukryj projekty' : 'Projekty i ich produkty'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          {err && <p className="muted">{err}</p>}
+          {projs === null && !err && <SkelList rows={2} />}
+          {projs?.length === 0 && <p className="muted">Brak projektów w tym workspace.</p>}
+          {projs?.map((p) => {
+            const keys = p.product_keys ?? []
+            return (
+              <div key={p.id} style={{ marginBottom: 10 }}>
+                <div className="row" style={{ gap: 8, flexWrap: 'nowrap' }}>
+                  <IcBox style={{ width: 15, height: 15, flexShrink: 0, color: 'var(--acid)' }} />
+                  <b style={{ fontSize: 14 }}>{p.name}</b>
+                </div>
+                <div className="chips" style={{ marginTop: 5 }}>
+                  {prods.map((pr) => {
+                    const on = keys.includes(pr.key)
+                    return (
+                      <button key={pr.key} type="button" className={on ? 'on' : ''} onClick={() => toggle(p, pr.key, !on)}>
+                        {pr.name}
+                      </button>
+                    )
+                  })}
+                  {prods.length === 0 && <span className="muted">Najpierw przypisz produkty do workspace'u.</span>}
+                </div>
+                {keys.length === 0 && prods.length > 0 && (
+                  <p className="mono" style={{ fontSize: 9.5, opacity: 0.6, marginTop: 4 }}>
+                    bez przypisania — widoczny we wszystkich produktach workspace'u
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
