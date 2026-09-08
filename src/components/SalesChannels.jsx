@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, salesApi, FN_BASE } from '../lib/api.js'
 import { IcCheck, IcCopy, IcMail, IcPhone, IcSend, IcWhatsApp } from '../components/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
+import ProjectEmail from '../shared/ProjectEmail.jsx'
 
 // ── Kanały ──────────────────────────────────────────────────────────────────
 function CodeBox({ code }) {
@@ -111,10 +112,7 @@ export default function SalesChannels({ projId, cfgData, refreshCfg }) {
           <span className="corner br" />
           <div className="row" style={{ marginBottom: 12 }}>
             <IcMail style={{ width: 18, height: 18, color: 'var(--acid)' }} />
-            <b>E-mail (Resend)</b>
-            <span className="right row" style={{ gap: 6 }}>
-              {email.resend_key && email.from_email ? <span className="badge acid">Skonfigurowany</span> : <span className="badge">Nieaktywny</span>}
-            </span>
+            <b>Wysyłka e-mail sprzedawcy</b>
           </div>
           <label className="f">
             <span className="mono">Kanał e-mail</span>
@@ -127,28 +125,13 @@ export default function SalesChannels({ projId, cfgData, refreshCfg }) {
               </button>
             </div>
           </label>
-          <label className="f">
-            <span className="mono">Klucz API Resend</span>
-            <input type="password" value={email.resend_key || ''} onChange={(e) => setEmail('resend_key', e.target.value)} placeholder="re_…" autoComplete="off" />
-          </label>
-          <div className="fgrid">
-            <label className="f">
-              <span className="mono">Nazwa nadawcy</span>
-              <input value={email.from_name || ''} onChange={(e) => setEmail('from_name', e.target.value)} placeholder="Kacper z FIQ" />
-            </label>
-            <label className="f">
-              <span className="mono">Adres nadawcy (zweryfikowana domena)</span>
-              <input value={email.from_email || ''} onChange={(e) => setEmail('from_email', e.target.value)} placeholder="kacper@twojafirma.pl" />
-            </label>
-          </div>
-          <label className="f">
-            <span className="mono">Adres na odpowiedzi (reply-to — tu wracają maile klientów)</span>
-            <input value={email.reply_to || ''} onChange={(e) => setEmail('reply_to', e.target.value)} placeholder="oferty@twojafirma.pl" />
-          </label>
-          <label className="f">
-            <span className="mono">Podpis (opcjonalnie)</span>
-            <input value={email.signature || ''} onChange={(e) => setEmail('signature', e.target.value)} placeholder="Kacper Nowak, Twoja Firma, +48 …" />
-          </label>
+          {/* Adres nadawcy, klucz i podpis są WSPÓLNE dla projektu — ten sam komponent
+              stoi w AI Łowcy Leadów, więc konfiguracja z jednego produktu działa we
+              wszystkich. Tutaj zostają tylko ustawienia sprzedawcy. */}
+          <ProjectEmail
+            projectId={projId}
+            note="Adres, z którego pisze AI Sprzedawca."
+          />
           <label className="f">
             <span className="mono">Stopka z możliwością wypisania się (RODO)</span>
             <div className="chips">

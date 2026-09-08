@@ -488,8 +488,21 @@ const OPTOUT_FOOTER =
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 
-async function sendEmail(cfg: SalesCfg, to: string, subject: string, body: string, idemKey?: string) {
-  const e = cfg.email ?? {};
+// Klucz Resend, adres nadawcy i podpis są WSPÓLNE dla projektu — sprzedawca dostaje
+// je z `fiq_project_integrations`, a w swojej konfiguracji trzyma już tylko własne
+// ustawienia (włącznik kanału, stopka RODO). Dzięki temu skrzynkę można podłączyć
+// z dowolnego produktu, także gdy klient nie ma Braina.
+async function sharedEmail(projectId: string): Promise<Record<string, string>> {
+  const { data } = await db
+    .from("fiq_project_integrations").select("config").eq("project_id", projectId).eq("kind", "email").maybeSingle();
+  return (data?.config ?? {}) as Record<string, string>;
+}
+
+async function sendEmail(projectId: string, cfg: SalesCfg, to: string, subject: string, body: string, idemKey?: string) {
+  // wspólne pola projektu (klucz, nadawca, podpis) mają pierwszeństwo nad starą
+  // konfiguracją sprzedawcy — ta zostaje tylko dla projektów sprzed migracji
+  const shared = await sharedEmail(projectId);
+  const e = { ...(cfg.email ?? {}), ...shared } as NonNullable<SalesCfg["email"]>;
   if (!e.resend_key || !e.from_email) return { ok: false, error: "brak konfiguracji e-mail (klucz Resend / adres nadawcy)" };
   if (!EMAIL_RE.test(String(to).trim())) return { ok: false, error: `niepoprawny adres odbiorcy: ${to}` };
   if (!EMAIL_RE.test(String(e.from_email).trim())) return { ok: false, error: "niepoprawny adres nadawcy w ustawieniach" };
@@ -638,7 +651,7 @@ async function sendToLead(projectId: string, cfg: SalesCfg, lead: Lead, opts: { 
   }
 
   const res = channel === "email"
-    ? await sendEmail(cfg, lead.email, subject, body, `${lead.id}:${lead.attempts}`)
+    ? await sendEmail(projectId, cfg, lead.email, subject, body, `${lead.id}:${lead.attempts}`)
     : await sendWhatsApp(cfg, lead.phone, body, waTemplate, lead.name || undefined);
 
   const sentSubject = (res as { subject?: string }).subject || subject;
@@ -782,7 +795,7 @@ async function handleInbound(
   const subject = firstSubject ? `Re: ${firstSubject.replace(/^Re:\s*/i, "")}` : "";
 
   const res = channel === "email"
-    ? await sendEmail(cfg, lead.email, subject, body)
+    ? await sendEmail(projectId, cfg, lead.email, subject, body)
     : await sendWhatsApp(cfg, lead.phone, body, false);
 
   await db.from("brain_lead_messages").insert({
@@ -1242,7 +1255,7 @@ async function voiceWebhook(projectId: string, cfg: SalesCfg, projectName: strin
     ].join("\n");
     const waOpen = lead.last_in_at && Date.now() - new Date(lead.last_in_at).getTime() < 24 * 3600e3;
     const res = lead.email
-      ? await sendEmail(cfg, lead.email, `Po naszej rozmowie — ${analysis.product_name}`, text, `call:${convId}`)
+      ? await sendEmail(projectId, cfg, lead.email, `Po naszej rozmowie — ${analysis.product_name}`, text, `call:${convId}`)
       : lead.phone && (cfg.channels?.whatsapp || inbound) && waOpen
       ? await sendWhatsApp(cfg, lead.phone, text, false)
       : { ok: false, error: "brak kanału do wysłania linku (lead bez e-maila, okno WhatsApp zamknięte)" };
@@ -1479,6 +1492,7 @@ Deno.serve(async (req) => {
       const to = String(body.to ?? "").trim();
       if (!to) return J({ error: "brak adresu" }, 400);
       const res = await sendEmail(
+        proj.projectId,
         proj.cfg,
         to,
         "Test konfiguracji — AI Sprzedawca",

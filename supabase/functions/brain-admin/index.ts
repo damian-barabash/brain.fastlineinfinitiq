@@ -1053,6 +1053,34 @@ Deno.serve(async (req) => {
         }
         return J({ ok: true });
       }
+      // ── wspólne kanały projektu (e-mail/Resend) ───────────────────────
+      // Kanał należy do PROJEKTU, nie do produktu: ustawiony w jednym produkcie
+      // działa we wszystkich (obecnych i przyszłych). Wcześniej klucz Resend leżał
+      // w konfiguracji sprzedawcy, więc klient bez Braina nie miał gdzie go wpisać.
+      case "proj.integration": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const kind = String(body.kind || "email");
+        const { data } = await db
+          .from("fiq_project_integrations").select("config").eq("project_id", pid).eq("kind", kind).maybeSingle();
+        const cfg = (data?.config ?? {}) as Record<string, unknown>;
+        return J({ config: maskSecrets(cfg, [["resend_key"]]), kind });
+      }
+      case "proj.integration.set": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const kind = String(body.kind || "email");
+        const { data: prevRow } = await db
+          .from("fiq_project_integrations").select("config").eq("project_id", pid).eq("kind", kind).maybeSingle();
+        const prev = (prevRow?.config ?? {}) as Record<string, unknown>;
+        // maska „••••1234" znaczy „nie zmieniałem" — podstawiamy starą wartość
+        const cfg = restoreSecrets((body.config ?? {}) as Record<string, unknown>, prev, [["resend_key"]]);
+        const { error } = await db.from("fiq_project_integrations")
+          .upsert({ project_id: pid, kind, config: cfg, updated_at: new Date().toISOString() });
+        if (error) throw error;
+        return J({ ok: true, config: maskSecrets(cfg, [["resend_key"]]) });
+      }
+
       // Przypisanie PROJEKTU do produktów (pusty zestaw = wszystkie produkty
       // workspace'u). Dzięki temu w jednym workspace mogą stać obok siebie
       // projekty prowadzone przez różne produkty platformy.

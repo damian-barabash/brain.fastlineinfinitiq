@@ -42,9 +42,11 @@ export default function Dashboard() {
   const proj = session.proj
   const [days, setDays] = useState(30)
   const [channel, setChannel] = useState('')
-  const [tab, setTab] = useState('overview')
-  // Statystyki sprzedawcy widzi tylko klient tego produktu (i administrator).
-  const showSales = session.user?.role === 'admin' || session.product?.key === 'sales'
+  // Pulpit należy do produktu: AI Sprzedawca pokazuje swój lejek i wysyłkę,
+  // AI Doradca — rozmowy, oszczędzony czas i porównanie kosztów. Jeden panel,
+  // dwa różne obrazy — dlatego zakładki i filtry też są rozdzielone.
+  const isSales = session.product?.key === 'sales'
+  const [tab, setTab] = useState(isSales ? 'sales' : 'overview')
   const [wage, setWage] = useState(45) // zł/h — do porównania kosztów
   const [data, refresh] = useCached('stats', { project_id: proj.id, days, channel_type: channel || undefined })
 
@@ -114,18 +116,20 @@ export default function Dashboard() {
         <div>
           <div className="mono">
             <span className="dot" style={{ marginRight: 8 }} />
-            {proj.name} // analityka
+            {proj.name} // {isSales ? 'sprzedaż' : 'rozmowy'}
           </div>
-          <h1>Dashboard</h1>
+          <h1>{session.product?.name ?? 'Dashboard'}</h1>
         </div>
         <div className="row">
-          <div className="chips">
-            {CHANNELS.map((c) => (
-              <button key={c.key} className={channel === c.key ? 'on' : ''} onClick={() => setChannel(c.key)}>
-                {c.label}
-              </button>
-            ))}
-          </div>
+          {!isSales && (
+            <div className="chips">
+              {CHANNELS.map((c) => (
+                <button key={c.key} className={channel === c.key ? 'on' : ''} onClick={() => setChannel(c.key)}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
           <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ width: 'auto' }}>
             <option value={7}>Ostatnie 7 dni</option>
             <option value={30}>Ostatnie 30 dni</option>
@@ -134,25 +138,22 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="tabs">
-        <button className={tab === 'overview' ? 'on' : ''} onClick={() => setTab('overview')}>
-          Przegląd
-        </button>
-        <button className={tab === 'convs' ? 'on' : ''} onClick={() => setTab('convs')}>
-          Konwersacje
-        </button>
-        <button className={tab === 'costs' ? 'on' : ''} onClick={() => setTab('costs')}>
-          Porównanie
-        </button>
-        {showSales && (
-          <button className={tab === 'sales' ? 'on' : ''} onClick={() => setTab('sales')}>
-            AI Sprzedawca
+      {!isSales && (
+        <div className="tabs">
+          <button className={tab === 'overview' ? 'on' : ''} onClick={() => setTab('overview')}>
+            Przegląd
           </button>
-        )}
-      </div>
+          <button className={tab === 'convs' ? 'on' : ''} onClick={() => setTab('convs')}>
+            Konwersacje
+          </button>
+          <button className={tab === 'costs' ? 'on' : ''} onClick={() => setTab('costs')}>
+            Porównanie
+          </button>
+        </div>
+      )}
 
-      {tab === 'sales' && showSales && <SalesStats projId={proj.id} days={days} />}
-      {tab !== 'sales' && !S && (
+      {isSales && <SalesStats projId={proj.id} days={days} />}
+      {!isSales && !S && (
         <>
           <SkelStats n={8} />
           <div className="spacer" />
@@ -162,9 +163,9 @@ export default function Dashboard() {
           </div>
         </>
       )}
-      {S && tab === 'overview' && <Overview S={S} />}
-      {S && tab === 'convs' && <Conversations S={S} projId={proj.id} refetch={refresh} />}
-      {S && tab === 'costs' && <Costs S={S} wage={wage} setWage={setWage} />}
+      {!isSales && S && tab === 'overview' && <Overview S={S} />}
+      {!isSales && S && tab === 'convs' && <Conversations S={S} projId={proj.id} refetch={refresh} />}
+      {!isSales && S && tab === 'costs' && <Costs S={S} wage={wage} setWage={setWage} />}
     </>
   )
 }

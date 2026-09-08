@@ -24,12 +24,12 @@ export default function IntegrationsPage() {
   const [cfgData, refreshCfg] = useCached('sales.get', { project_id: proj.id })
   const channels = chData?.channels ?? null
 
-  // Klient widzi kanały tylko wykupionego agenta; administrator — wszystkie,
-  // bo konfiguruje je w imieniu klienta (ta sama zasada co w menu panelu).
-  const both = session.user?.role === 'admin'
+  // Integracje należą do produktu: doradca ma widget i kanały Meta, sprzedawca
+  // swoje kanały wysyłki. Kontekst wyznacza wybrany produkt (też dla admina).
   const productName = session.product?.name ?? 'AI Doradca'
-  const isAdvisor = both || session.product?.key !== 'sales'
-  const isSales = both || session.product?.key === 'sales'
+  const isAdvisor = session.product?.key !== 'sales'
+  const isSales = session.product?.key === 'sales'
+  const both = false
   return (
     <>
       <div className="pagehead">

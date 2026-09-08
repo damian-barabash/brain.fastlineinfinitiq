@@ -41,11 +41,10 @@ export default function Shell() {
   // gdy powstanie jego moduł. Wybór produktu decyduje, którą sekcję widzi klient;
   // workspace'y, projekty i baza wiedzy zostają wspólne.
   const [product, setProduct] = useState(session.product ?? PRODUCT_FALLBACK)
-  // Administrator obsługuje oba produkty (konfiguruje je za klienta), klient
-  // widzi wyłącznie tego agenta, którego ma wykupionego.
-  const bothProducts = user?.role === 'admin'
-  const isAdvisor = bothProducts || product.key === 'advisor'
-  const isSales = bothProducts || product.key === 'sales'
+  // Wybrany produkt wyznacza kontekst pracy — także administratorowi. Żeby wejść
+  // do drugiego agenta, przełącza się produkt przyciskiem PD (nie ma dwóch sekcji naraz).
+  const isAdvisor = product.key === 'advisor'
+  const isSales = product.key === 'sales'
 
   // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
   // może wpuścić do Brain kogoś, komu produkt odebrano.
