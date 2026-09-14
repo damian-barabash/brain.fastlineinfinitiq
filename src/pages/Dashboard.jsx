@@ -28,6 +28,9 @@ const CHANNELS = [
   { key: 'whatsapp', label: 'WhatsApp' },
   { key: 'instagram', label: 'Instagram' },
   { key: 'facebook', label: 'Facebook' },
+  { key: 'linkedin', label: 'LinkedIn' },
+  { key: 'messenger', label: 'Messenger' },
+  { key: 'telegram', label: 'Telegram' },
 ]
 
 function dayKey(iso) {

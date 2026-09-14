@@ -37,10 +37,14 @@ export default function SalesChannels({ projId, cfgData, refreshCfg }) {
   const [testPhone, setTestPhone] = useState('')
   const [voiceRes, setVoiceRes] = useState(null)
   const dirty = useRef(false)
+  const [accounts, setAccounts] = useState(null) // konta klienta z Unipile (wspólne dla projektu)
 
   useEffect(() => {
     if (cfgData && !dirty.current) setCfg(cfgData.config || {})
   }, [cfgData])
+  useEffect(() => {
+    api('accounts.list', { project_id: projId }).then((d) => setAccounts(d.accounts ?? [])).catch(() => setAccounts([]))
+  }, [projId])
 
   if (!cfg) return <SkelPage head={false} cards={2} />
   const email = cfg.email || {}
@@ -48,6 +52,8 @@ export default function SalesChannels({ projId, cfgData, refreshCfg }) {
   const voice = cfg.voice || {}
   const channels = cfg.channels || { email: true }
   const hook = cfg.hook_key || ''
+  const waMode = wa.mode || 'auto'
+  const waAccount = accounts?.find((a) => a.provider === 'WHATSAPP' && a.status === 'OK') ?? null
   const setEmail = (k, v) => {
     dirty.current = true
     setCfg((c) => ({ ...c, email: { ...(c.email || {}), [k]: v } }))
@@ -159,14 +165,16 @@ export default function SalesChannels({ projId, cfgData, refreshCfg }) {
           <CodeBox code={`${FN_BASE}/brain-sales?hook=email&key=${hook}`} />
         </div>
 
-        <div className="card">
+        <div className="card" data-sales-whatsapp>
           <span className="corner tl" />
           <span className="corner br" />
           <div className="row" style={{ marginBottom: 12 }}>
             <IcWhatsApp style={{ width: 18, height: 18, color: 'var(--acid)' }} />
-            <b>WhatsApp (Cloud API)</b>
+            <b>WhatsApp</b>
             <span className="right row" style={{ gap: 6 }}>
-              {wa.phone_number_id && wa.wa_token ? <span className="badge acid">Skonfigurowany</span> : <span className="badge">Nieaktywny</span>}
+              {waMode !== 'cloud' && waAccount ? <span className="badge acid">numer klienta: {waAccount.account_name || 'podłączony'}</span> : null}
+              {waMode !== 'unipile' && wa.phone_number_id && wa.wa_token ? <span className="badge acid">Cloud API</span> : null}
+              {!waAccount && !(wa.phone_number_id && wa.wa_token) ? <span className="badge">Nieaktywny</span> : null}
             </span>
           </div>
           <label className="f">
@@ -180,36 +188,106 @@ export default function SalesChannels({ projId, cfgData, refreshCfg }) {
               </button>
             </div>
           </label>
-          <div className="fgrid">
-            <label className="f">
-              <span className="mono">Phone Number ID</span>
-              <input value={wa.phone_number_id || ''} onChange={(e) => setWa('phone_number_id', e.target.value)} />
-            </label>
-            <label className="f">
-              <span className="mono">Token dostępu (System User)</span>
-              <input type="password" value={wa.wa_token || ''} onChange={(e) => setWa('wa_token', e.target.value)} autoComplete="off" />
-            </label>
-          </div>
-          <div className="fgrid">
-            <label className="f">
-              <span className="mono">Szablon pierwszego kontaktu</span>
-              <input value={wa.template_name || ''} onChange={(e) => setWa('template_name', e.target.value)} placeholder="np. pierwszy_kontakt" />
-            </label>
-            <label className="f">
-              <span className="mono">Język szablonu</span>
-              <input value={wa.template_lang || 'pl'} onChange={(e) => setWa('template_lang', e.target.value)} />
-            </label>
+          {/* Numer klienta podłączony linkiem (Unipile) nie potrzebuje szablonów ani aplikacji Meta,
+              ale to KONTO KLIENTA — stąd bezpieczniki z zaleceń dostawcy. Cloud API zostaje dla
+              firm, które chcą własny numer biznesowy z szablonami. */}
+          <label className="f">
+            <span className="mono">Sposób wysyłki</span>
+            <div className="chips" data-wa-mode>
+              <button type="button" className={waMode === 'auto' ? 'on' : ''} onClick={() => setWa('mode', 'auto')} title="Numer klienta, gdy jest podłączony; inaczej Cloud API">
+                Auto
+              </button>
+              <button type="button" className={waMode === 'unipile' ? 'on' : ''} onClick={() => setWa('mode', 'unipile')}>
+                Numer klienta (podłączony linkiem)
+              </button>
+              <button type="button" className={waMode === 'cloud' ? 'on' : ''} onClick={() => setWa('mode', 'cloud')}>
+                Cloud API (Meta)
+              </button>
+            </div>
+          </label>
+          {waMode !== 'cloud' && (
+            <>
+              <p className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
+                {waAccount
+                  ? <>Numer <b>{waAccount.account_name || waAccount.account_id}</b> jest podłączony — pierwszą wiadomość pisze model, bez szablonów.</>
+                  : <>Numer klienta podłącza się w karcie <b>Kanały klienta</b> na górze tej strony (link dla klienta, skan kodu QR).</>}
+                {' '}Bezpieczniki poniżej wynikają z zaleceń dostawcy: świeżo podłączony numer bez rozgrzewki i zbyt wiele nowych rozmów kończą się blokadą konta.
+              </p>
+              <div className="fgrid">
+                <label className="f">
+                  <span className="mono">Nowych rozmów na dobę</span>
+                  <input type="number" min="1" max="200" value={wa.daily_new_chats ?? 20} onChange={(e) => setWa('daily_new_chats', Number(e.target.value) || 20)} />
+                </label>
+                <label className="f">
+                  <span className="mono">Rozgrzewka po podłączeniu (h)</span>
+                  <input type="number" min="0" max="168" value={wa.warmup_hours ?? 24} onChange={(e) => setWa('warmup_hours', Number(e.target.value) || 0)} />
+                </label>
+                <label className="f">
+                  <span className="mono">Odstęp między wiadomościami (s)</span>
+                  <input type="number" min="3" max="120" value={wa.min_gap_s ?? 15} onChange={(e) => setWa('min_gap_s', Number(e.target.value) || 15)} />
+                </label>
+              </div>
+            </>
+          )}
+          {waMode !== 'unipile' && (
+            <>
+              <div className="fgrid">
+                <label className="f">
+                  <span className="mono">Phone Number ID</span>
+                  <input value={wa.phone_number_id || ''} onChange={(e) => setWa('phone_number_id', e.target.value)} />
+                </label>
+                <label className="f">
+                  <span className="mono">Token dostępu (System User)</span>
+                  <input type="password" value={wa.wa_token || ''} onChange={(e) => setWa('wa_token', e.target.value)} autoComplete="off" />
+                </label>
+              </div>
+              <div className="fgrid">
+                <label className="f">
+                  <span className="mono">Szablon pierwszego kontaktu</span>
+                  <input value={wa.template_name || ''} onChange={(e) => setWa('template_name', e.target.value)} placeholder="np. pierwszy_kontakt" />
+                </label>
+                <label className="f">
+                  <span className="mono">Język szablonu</span>
+                  <input value={wa.template_lang || 'pl'} onChange={(e) => setWa('template_lang', e.target.value)} />
+                </label>
+              </div>
+              <label className="f">
+                <span className="mono">Token weryfikacji webhooka</span>
+                <input value={wa.verify_token || ''} onChange={(e) => setWa('verify_token', e.target.value)} placeholder="zostanie wygenerowany przy zapisie" />
+              </label>
+              <p className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
+                <b>Cloud API:</b> firma może rozpocząć rozmowę wyłącznie zatwierdzonym szablonem Meta — pierwszy
+                kontakt z zimnym leadem to Twój szablon, a po odpowiedzi klienta AI pisze już swobodnie (okno 24h). Webhook
+                poniżej wklej w aplikacji Meta (subskrybuj pole „messages").
+              </p>
+              <CodeBox code={`${FN_BASE}/brain-sales?hook=wa&key=${hook}`} />
+            </>
+          )}
+        </div>
+
+        <div className="card" data-sales-unipile>
+          <span className="corner tl" />
+          <span className="corner br" />
+          <div className="row" style={{ marginBottom: 12 }}>
+            <IcSend style={{ width: 18, height: 18, color: 'var(--acid)' }} />
+            <b>Instagram, LinkedIn, Messenger, Telegram</b>
           </div>
           <label className="f">
-            <span className="mono">Token weryfikacji webhooka</span>
-            <input value={wa.verify_token || ''} onChange={(e) => setWa('verify_token', e.target.value)} placeholder="zostanie wygenerowany przy zapisie" />
+            <span className="mono">Odpowiadaj i przyjmuj nowych na kanałach podłączonych linkiem</span>
+            <div className="chips">
+              <button type="button" className={channels.unipile !== false ? 'on' : ''} onClick={() => setChan('unipile', true)}>
+                Tak
+              </button>
+              <button type="button" className={channels.unipile === false ? 'on' : ''} onClick={() => setChan('unipile', false)}>
+                Nie
+              </button>
+            </div>
           </label>
-          <p className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
-            <b>Ważne:</b> WhatsApp pozwala firmie rozpocząć rozmowę wyłącznie zatwierdzonym szablonem Meta — pierwszy
-            kontakt z zimnym leadem to Twój szablon, a po odpowiedzi klienta AI pisze już swobodnie (okno 24h). Webhook
-            poniżej wklej w aplikacji Meta (subskrybuj pole „messages").
+          <p className="muted" style={{ fontSize: 12.5 }}>
+            Sprzedawca odpowiada swoim leadom w tej samej rozmowie, w której przyszła wiadomość. Osobę, której nie zna
+            (a doradca nie obsługuje tego konta), zakłada jako ciepłego leada — tak samo jak przy mailu. Pierwszy nie pisze
+            na tych kanałach nikomu: zimne zaczepki idą tylko e-mailem, WhatsAppem i telefonem.
           </p>
-          <CodeBox code={`${FN_BASE}/brain-sales?hook=wa&key=${hook}`} />
         </div>
 
         <div className="card">

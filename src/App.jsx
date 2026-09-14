@@ -8,6 +8,7 @@ import Shell from './components/Shell.jsx'
 const WidgetFrame = lazy(() => import('./pages/WidgetFrame.jsx'))
 const Demo = lazy(() => import('./pages/Demo.jsx'))
 const SalesDemo = lazy(() => import('./pages/SalesDemo.jsx'))
+const Connect = lazy(() => import('./shared/Connect.jsx'))
 
 function Guard({ children, needProject }) {
   const loc = useLocation()
@@ -24,6 +25,8 @@ export default function App() {
         <Route path="/w" element={<WidgetFrame />} />
         <Route path="/demo" element={<Demo />} />
         <Route path="/sdemo" element={<SalesDemo />} />
+        {/* publiczne zaproszenie do podłączenia kanałów (WhatsApp/Instagram/…) — wspólna strona platformy */}
+        <Route path="/connect" element={<Connect product="AI Doradca · AI Sprzedawca" />} />
         <Route
           path="/"
           element={

@@ -308,6 +308,154 @@ async function integrationsStatus(force = false) {
   return { unipile, maps, ai_provider: ai };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Kanały klienta przez Unipile — wspólne dla WSZYSTKICH produktów (2026-09-14)
+// ═══════════════════════════════════════════════════════════════════════════
+// Klient nie podaje nam haseł: admin generuje link `/connect?t=…`, klient go otwiera,
+// a logowanie (QR WhatsApp, hasło+2FA Instagram/LinkedIn) robi na stronie Unipile.
+// Po podłączeniu Unipile woła notify_url (brain-hook?hook=unipile-auth) z `name` =
+// nasz token → konto ląduje w fiq_project_accounts PROJEKTU. Tę samą tabelę czytają
+// AI Doradca, AI Sprzedawca i AI Łowca Leadów. Link Unipile żyje krótko (do ich
+// dobowego restartu), więc nasz adres jest stały, a kreator mintujemy przy kliknięciu.
+const PROVIDERS = ["WHATSAPP", "INSTAGRAM", "LINKEDIN", "MESSENGER", "TELEGRAM"];
+const PROVIDER_LABEL: Record<string, string> = {
+  WHATSAPP: "WhatsApp", INSTAGRAM: "Instagram", LINKEDIN: "LinkedIn", MESSENGER: "Messenger", TELEGRAM: "Telegram",
+};
+const LINK_TTL_DAYS = 30;
+const LINK_MAX_OPENS = 50; // zapora na bota, który w kółko generowałby kreatory
+const ORIGINS = new Set([
+  "https://brain.fastlineinfinitiq.pl",
+  "https://hand.fastlineinfinitiq.pl",
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:4173",
+]);
+const UNI_HOOK_KEY = Deno.env.get("UNIPILE_HOOK_KEY") ?? "";
+const HOOK_BASE = `${Deno.env.get("SUPABASE_URL")}/functions/v1/brain-hook`;
+
+type ConnectLink = {
+  token: string; project_id: string; kind: string; reconnect_account: string | null; providers: string[]; origin: string;
+  expires_at: string | null; revoked_at: string | null; connected_at: string | null;
+  account_id: string | null; account_name: string | null; accounts: unknown[]; opens: number; created_at: string;
+};
+
+async function unipileDsn() {
+  const { cfg, token } = await integrationKey("unipile", "UNIPILE_TOKEN");
+  const dsn = String(cfg.dsn ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return { dsn, token, ready: !!(dsn && token) };
+}
+
+async function uniFetch(path: string, init: RequestInit = {}, timeout = 25_000): Promise<Record<string, unknown>> {
+  const { dsn, token, ready } = await unipileDsn();
+  if (!ready) throw new Error("Unipile nieskonfigurowane — wklej DSN i token w Admin → Integracje");
+  const r = await fetch(`https://${dsn}/api/v1${path}`, {
+    ...init,
+    headers: { "X-API-KEY": token, accept: "application/json", "Content-Type": "application/json", ...((init.headers as Record<string, string>) ?? {}) },
+    signal: AbortSignal.timeout(timeout),
+  });
+  const text = await r.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text.slice(0, 300) };
+  }
+  if (!r.ok) throw new Error(`Unipile ${r.status}: ${text.slice(0, 200)}`);
+  return data;
+}
+
+const connectUrl = (l: ConnectLink) => `${l.origin}/connect?t=${l.token}`;
+
+function linkState(l: ConnectLink | null): string {
+  if (!l) return "none";
+  if (l.revoked_at) return "revoked";
+  if (l.expires_at && new Date(l.expires_at) < new Date()) return "expired";
+  return l.connected_at ? "connected" : "waiting";
+}
+
+async function currentLink(projectId: string): Promise<ConnectLink | null> {
+  const { data } = await db.from("fiq_connect_links").select("*")
+    .eq("project_id", projectId).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  return (data ?? null) as ConnectLink | null;
+}
+
+async function projectAccounts(projectId: string) {
+  const { data } = await db.from("fiq_project_accounts")
+    .select("id, provider, account_id, account_name, status, status_at, connected_at")
+    .eq("project_id", projectId).order("connected_at", { ascending: false });
+  return (data ?? []).map((a) => ({ ...a, label: PROVIDER_LABEL[a.provider] ?? a.provider }));
+}
+
+// Webhooki Unipile są GLOBALNE (wszystkie konta instalacji) — rejestrujemy raz i pilnujemy,
+// żeby były (klient podłączył konto, a webhooka nie ma = doradca milczy bez śladu).
+async function ensureUnipileWebhooks(): Promise<{ messaging: string; account_status: string }> {
+  if (!UNI_HOOK_KEY) throw new Error("brak sekretu UNIPILE_HOOK_KEY");
+  const wanted: Record<string, { url: string; source: string; events?: string[] }> = {
+    messaging: { url: `${HOOK_BASE}?hook=unipile&key=${UNI_HOOK_KEY}`, source: "messaging", events: ["message_received"] },
+    account_status: { url: `${HOOK_BASE}?hook=unipile-status&key=${UNI_HOOK_KEY}`, source: "account_status" },
+  };
+  const list = await uniFetch("/webhooks", {}, 15_000);
+  const items = (list?.items ?? []) as Array<Record<string, unknown>>;
+  const out: Record<string, string> = {};
+  for (const [name, w] of Object.entries(wanted)) {
+    const hit = items.find((i) => String(i.request_url ?? "") === w.url && String(i.source ?? "") === w.source);
+    if (hit) {
+      out[name] = String(hit.id ?? hit.webhook_id ?? "ok");
+      continue;
+    }
+    const body: Record<string, unknown> = {
+      request_url: w.url, source: w.source, name: `fiq-${name}`, format: "json", enabled: true,
+      headers: [{ key: "x-hook-key", value: UNI_HOOK_KEY }],
+    };
+    if (w.events) body.events = w.events;
+    const created = await uniFetch("/webhooks", { method: "POST", body: JSON.stringify(body) }, 20_000);
+    out[name] = String(created?.webhook_id ?? created?.id ?? "created");
+    console.log("unipile webhook zarejestrowany", name, out[name]);
+  }
+  return out as { messaging: string; account_status: string };
+}
+
+/** Świeży link kreatora Unipile — ważny 2 h. Dla kilku providerów kreator sam daje wybór. */
+async function hostedAuthUrl(link: ConnectLink): Promise<string> {
+  const { dsn } = await unipileDsn();
+  const payload: Record<string, unknown> = {
+    type: link.kind === "reconnect" ? "reconnect" : "create",
+    api_url: `https://${dsn}`,
+    expiresOn: new Date(Date.now() + 2 * 3600_000).toISOString(),
+    name: link.token,
+    notify_url: `${HOOK_BASE}?hook=unipile-auth&key=${encodeURIComponent(UNI_HOOK_KEY)}`,
+    success_redirect_url: `${connectUrl(link)}&ok=1`,
+    failure_redirect_url: `${connectUrl(link)}&fail=1`,
+  };
+  if (link.kind === "reconnect") payload.reconnect_account = link.reconnect_account;
+  else {
+    const provs = (link.providers ?? []).filter((p) => PROVIDERS.includes(p));
+    payload.providers = provs.length ? provs : ["WHATSAPP", "INSTAGRAM", "LINKEDIN"];
+    // jeden provider = jedno konto; kilka = klient może podłączyć każdy kanał po kolei tym samym linkiem
+    payload.single_use = provs.length === 1;
+  }
+  const data = await uniFetch("/hosted/accounts/link", { method: "POST", body: JSON.stringify(payload) }, 20_000);
+  const url = String(data?.url ?? "");
+  if (!url) throw new Error("Unipile nie zwrócił adresu kreatora");
+  return url;
+}
+
+async function connectInfo(link: ConnectLink) {
+  const { data: proj } = await db.from("brain_projects").select("name, workspace_id").eq("id", link.project_id).maybeSingle();
+  const { data: ws } = proj
+    ? await db.from("brain_workspaces").select("name").eq("id", proj.workspace_id).maybeSingle()
+    : { data: null };
+  const accounts = (Array.isArray(link.accounts) ? link.accounts : []) as Array<Record<string, unknown>>;
+  return {
+    ok: true, state: linkState(link), kind: link.kind,
+    providers: (link.providers ?? []).map((p) => ({ key: p, label: PROVIDER_LABEL[p] ?? p })),
+    project: String(proj?.name ?? ""), workspace: String(ws?.name ?? ""),
+    account_name: link.account_name ?? "",
+    accounts: accounts.map((a) => ({ provider: a.provider, label: PROVIDER_LABEL[String(a.provider)] ?? a.provider, name: a.name, at: a.at })),
+  };
+}
+
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
@@ -343,11 +491,134 @@ Deno.serve(async (req) => {
       });
     }
 
+    // ── strona /connect?t=… (publiczna: klient nie ma konta w panelu, autoryzuje token) ──
+    if (action === "connect.info" || action === "connect.start") {
+      const t = String(body.t ?? "");
+      const { data } = t ? await db.from("fiq_connect_links").select("*").eq("token", t).maybeSingle() : { data: null };
+      const link = (data ?? null) as ConnectLink | null;
+      const state = linkState(link);
+      if (!link || state === "revoked" || state === "expired") return J({ ok: false, state: link ? state : "none" });
+      const info = await connectInfo(link);
+      if (action === "connect.info") return J(info);
+      if (link.kind === "reconnect" && state === "connected") return J({ ...info, already: true });
+      if ((link.opens ?? 0) >= LINK_MAX_OPENS) return J({ ok: false, state: "revoked" });
+      try {
+        // zanim klient podłączy konto, webhooki muszą istnieć — inaczej pierwsze wiadomości przepadną
+        await ensureUnipileWebhooks().catch((e) => console.error("ensureUnipileWebhooks", String(e).slice(0, 200)));
+        const url = await hostedAuthUrl(link);
+        await db.from("fiq_connect_links").update({
+          opens: (link.opens ?? 0) + 1, last_open_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        }).eq("token", t);
+        return J({ ...info, url });
+      } catch (e) {
+        const msg = String((e as Error).message ?? e);
+        console.error("hosted auth:", msg.slice(0, 200));
+        return J({ ok: false, state, error: msg.slice(0, 200) });
+      }
+    }
+
     const user = await getUser(body.token as string | undefined);
     if (!user) return J({ error: "auth" }, 401);
     const admin = user.role === "admin";
 
     switch (action) {
+      // ── kanały klienta (Unipile) — wspólne dla produktów ─────────────────
+      case "accounts.list": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        return J({ accounts: await projectAccounts(pid) });
+      }
+      case "connect.get": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const link = await currentLink(pid);
+        return J({
+          state: linkState(link),
+          kind: link?.kind ?? "create",
+          url: link ? connectUrl(link) : "",
+          providers: link?.providers ?? [],
+          expires_at: link?.expires_at ?? null,
+          opens: link?.opens ?? 0,
+          connected_at: link?.connected_at ?? null,
+          account_name: link?.account_name ?? "",
+          link_accounts: Array.isArray(link?.accounts) ? link!.accounts : [],
+          accounts: await projectAccounts(pid),
+        });
+      }
+      case "connect.create": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const kind = String(body.kind ?? "create") === "reconnect" ? "reconnect" : "create";
+        const originRaw = String(body.origin ?? "").replace(/\/+$/, "");
+        const origin = ORIGINS.has(originRaw) ? originRaw : "https://brain.fastlineinfinitiq.pl";
+        let reconnect: string | null = null;
+        let providers = (Array.isArray(body.providers) ? body.providers : []).map((p) => String(p).toUpperCase()).filter((p) => PROVIDERS.includes(p));
+        if (kind === "reconnect") {
+          reconnect = String(body.account_id ?? "") || null;
+          if (!reconnect) return J({ error: "Podaj konto do ponownego podłączenia" }, 400);
+          const { data: acc } = await db.from("fiq_project_accounts").select("provider").eq("project_id", pid).eq("account_id", reconnect).maybeSingle();
+          if (!acc) return J({ error: "To konto nie należy do projektu" }, 400);
+          providers = [String(acc.provider)];
+        }
+        if (!providers.length) return J({ error: "Wybierz przynajmniej jeden kanał" }, 400);
+        // stary, niewykorzystany link przestaje działać w chwili wydania nowego
+        await db.from("fiq_connect_links")
+          .update({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq("project_id", pid).is("revoked_at", null).is("connected_at", null);
+        const token = newToken();
+        const { error } = await db.from("fiq_connect_links").insert({
+          token, project_id: pid, kind, reconnect_account: reconnect, providers, origin, created_by: user.id,
+          expires_at: new Date(Date.now() + LINK_TTL_DAYS * 86400_000).toISOString(),
+        });
+        if (error) return J({ error: `Nie udało się zapisać linku: ${error.message}` }, 500);
+        return J({ ok: true, url: `${origin}/connect?t=${token}`, state: "waiting", kind, providers });
+      }
+      case "connect.revoke": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        if (!admin) return J({ error: "forbidden" }, 403);
+        await db.from("fiq_connect_links")
+          .update({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq("project_id", pid).is("revoked_at", null);
+        return J({ ok: true, state: "none" });
+      }
+      // Odłączenie: kasujemy konto u Unipile (sesja klienta ginie) i u nas.
+      case "accounts.disconnect": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const id = String(body.id ?? "");
+        const { data: acc } = await db.from("fiq_project_accounts").select("*").eq("id", id).maybeSingle();
+        if (!acc) return J({ error: "not found" }, 404);
+        await assertProject(user, acc.project_id);
+        try {
+          await uniFetch(`/accounts/${encodeURIComponent(acc.account_id)}`, { method: "DELETE" }, 20_000);
+        } catch (e) {
+          const msg = String((e as Error).message ?? e);
+          if (!/404|not found/i.test(msg)) return J({ error: `Unipile nie odłączył konta: ${msg.slice(0, 160)}` }, 400);
+        }
+        await db.from("brain_channels").delete().eq("project_id", acc.project_id).eq("type", "unipile").contains("config", { account_id: acc.account_id });
+        if (acc.provider === "LINKEDIN") {
+          const { data: hc } = await db.from("hand_config").select("config").eq("project_id", acc.project_id).maybeSingle();
+          const cfg = (hc?.config ?? {}) as Record<string, unknown>;
+          if (String(cfg.unipile_account_id ?? "") === acc.account_id) {
+            await db.from("hand_config").upsert({ project_id: acc.project_id, config: { ...cfg, unipile_account_id: "" }, updated_at: new Date().toISOString() });
+          }
+        }
+        await db.from("fiq_project_accounts").delete().eq("id", id);
+        await db.from("brain_settings").delete().eq("key", "unipile_status");
+        return J({ ok: true });
+      }
+      // Rejestracja webhooków Unipile (idempotentna) + ich lista — do sprawdzenia w panelu admina.
+      case "unipile.webhooks": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const ensured = body.ensure === false ? null : await ensureUnipileWebhooks();
+        const list = await uniFetch("/webhooks", {}, 15_000);
+        const items = ((list?.items ?? []) as Array<Record<string, unknown>>).map((w) => ({
+          id: w.id ?? w.webhook_id, source: w.source, url: String(w.request_url ?? "").replace(/key=[^&]+/, "key=•••"), enabled: w.enabled, name: w.name,
+        }));
+        return J({ ensured, webhooks: items });
+      }
+
       case "me":
         return J({ user });
       case "logout": {

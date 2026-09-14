@@ -17,6 +17,7 @@ import {
 } from '../components/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
 import SalesChannels from '../components/SalesChannels.jsx'
+import ChannelsConnect from '../shared/ChannelsConnect.jsx'
 
 export default function IntegrationsPage() {
   const proj = session.proj
@@ -46,6 +47,17 @@ export default function IntegrationsPage() {
         </div>
       </div>
 
+      {/* Kanały podłączone przez klienta (Unipile) — wspólne dla doradcy i sprzedawcy.
+          Doradca ma przy każdym koncie przełącznik „odpowiada"; sprzedawca czyta te same
+          konta do wysyłki WhatsApp i odpowiedzi na Instagramie/LinkedInie. */}
+      <ChannelsConnect
+        projectId={proj.id}
+        title="Kanały klienta — WhatsApp, Instagram, LinkedIn, Telegram"
+        renderAccount={isAdvisor ? (a) => <AdvisorToggle projId={proj.id} account={a} channels={channels} refreshChannels={refreshChannels} /> : undefined}
+        onChange={() => refreshChannels()}
+      />
+      <div className="spacer" />
+
       {isAdvisor && (
         <>
           <div className="mono" style={{ opacity: 0.62, margin: '2px 0 14px' }}>
@@ -64,6 +76,39 @@ export default function IntegrationsPage() {
         </>
       )}
     </>
+  )
+}
+
+
+// Czy doradca odpowiada na tym koncie. Kanał `unipile` powstaje przy podłączeniu
+// (brain-hook): WhatsApp/Instagram/Telegram włączone od razu, LinkedIn wyłączony —
+// to prywatna skrzynka właściciela, a leady LinkedIn prowadzi Łowca. Tu można to zmienić.
+function AdvisorToggle({ projId, account, channels, refreshChannels }) {
+  const ch = channels?.find((c) => c.type === 'unipile' && c.config?.account_id === account.account_id)
+  const [busy, setBusy] = useState(false)
+  const on = !!ch?.enabled
+  async function set(enabled) {
+    setBusy(true)
+    try {
+      if (ch) await api('channels.update', { id: ch.id, enabled })
+      else await api('channels.create', { project_id: projId, type: 'unipile', name: `${account.label} · ${account.account_name || ''}`.trim(), config: { account_id: account.account_id, provider: account.provider } })
+      await refreshChannels()
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (!channels) return null
+  return (
+    <div className="row" style={{ gap: 8, flexWrap: 'wrap' }} data-advisor-toggle={account.provider}>
+      <span className="mono" style={{ fontSize: 10.5 }}>Doradca odpowiada</span>
+      <div className="chips">
+        <button type="button" className={on ? 'on' : ''} disabled={busy} onClick={() => set(true)}>Tak</button>
+        <button type="button" className={!on ? 'on' : ''} disabled={busy} onClick={() => set(false)}>Nie</button>
+      </div>
+      {account.provider === 'LINKEDIN' && !on && (
+        <span className="muted" style={{ fontSize: 11.5 }}>LinkedIn: leady prowadzi Łowca, resztę skrzynki zostawiamy właścicielowi.</span>
+      )}
+    </div>
   )
 }
 
@@ -94,6 +139,7 @@ function Integrations({ projId, channels, refreshChannels }) {
   const [position, setPosition] = useState(widget?.config?.position || 'left')
   const [waPhone, setWaPhone] = useState(widget?.config?.wa_phone || '')
   const [savedW, setSavedW] = useState(false)
+  const [showMeta, setShowMeta] = useState(() => (channels ?? []).some((c) => ['facebook', 'instagram', 'whatsapp'].includes(c.type)))
   const dirtyW = useRef(false)
   const widgetCfgKey = JSON.stringify(widget?.config ?? null)
 
@@ -216,7 +262,17 @@ function Integrations({ projId, channels, refreshChannels }) {
       </div>
 
       <div className="spacer" />
-      <h2 style={{ fontSize: 16, marginBottom: 6 }}>Kanały API — Meta</h2>
+      <div className="row" style={{ marginBottom: 6, gap: 10, flexWrap: 'wrap' }}>
+        <h2 style={{ fontSize: 16, margin: 0 }}>Zaawansowane — własna aplikacja Meta</h2>
+        <button className="btn sm" onClick={() => setShowMeta((v) => !v)} data-meta-toggle>
+          {showMeta ? 'Zwiń' : 'Pokaż'}
+        </button>
+      </div>
+      <p className="muted" style={{ marginBottom: 14 }}>
+        Zwykle niepotrzebne: WhatsApp i Instagram klient podłącza linkiem wyżej. Aplikacja Meta jest dla firm, które
+        chcą Messengera strony firmowej albo WhatsApp Business API z szablonami.
+      </p>
+      {showMeta && (<>
       <p className="muted" style={{ marginBottom: 14 }}>
         Webhook jest gotowy i wspólny dla wszystkich kanałów: <code className="mono">{FN_BASE}/brain-hook</code>.
         Podłącz aplikację Meta Business, wklej tokeny — doradca zacznie odpowiadać w tych kanałach.
@@ -283,6 +339,7 @@ function Integrations({ projId, channels, refreshChannels }) {
           ]}
         />
       </div>
+      </>)}
     </>
   )
 }

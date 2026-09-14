@@ -21,10 +21,10 @@ const CARDS = [
   {
     key: 'unipile',
     icon: IcLinkedIn,
-    title: 'Unipile — LinkedIn',
+    title: 'Unipile — WhatsApp, Instagram, LinkedIn, Messenger, Telegram',
     where: 'https://dashboard.unipile.com',
     desc:
-      'Jeden token na całą platformę. Konta LinkedIn podpinasz po stronie Unipile, a z którego konta szuka dany projekt — wybierasz w AI Łowca Leadów → Integracje.',
+      'Jeden token na całą platformę. Konta klientów podłączają się same linkiem z Integracji projektu (bez aplikacji Meta). Webhooki dostawcy rejestrujemy sami — przycisk poniżej sprawdza, czy są.',
   },
   {
     key: 'maps',
@@ -35,6 +35,44 @@ const CARDS = [
       'Źródło leadów lokalnych: nazwa, adres, telefon, strona. W projekcie Google musi być włączone Places API (New).',
   },
 ]
+
+
+// Webhooki Unipile są globalne (jeden na wszystkie konta). Bez nich klient podłączy
+// konto, a agent będzie milczał bez śladu — dlatego stan pokazujemy tu, a rejestracja
+// jest idempotentna (`unipile.webhooks` dorejestruje brakujące).
+function UnipileWebhooks() {
+  const [res, setRes] = useState(null)
+  const [busy, setBusy] = useState(false)
+  async function run() {
+    setBusy(true)
+    try {
+      setRes(await api('unipile.webhooks', { ensure: true }))
+    } catch (e) {
+      setRes({ error: e.message })
+    } finally {
+      setBusy(false)
+    }
+  }
+  const has = (src) => res?.webhooks?.some((w) => w.source === src && w.enabled !== false)
+  return (
+    <div className="note" style={{ marginBottom: 12 }} data-unipile-webhooks>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <span>Webhooki dostawcy (wiadomości + stan kont)</span>
+        <button className="btn sm right" onClick={run} disabled={busy}>
+          {busy ? 'Sprawdzam…' : 'Sprawdź i dorejestruj'}
+        </button>
+      </div>
+      {res?.error && <p className="err" style={{ marginTop: 8 }}>{res.error}</p>}
+      {res?.webhooks && (
+        <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+          <span className={'badge ' + (has('messaging') ? 'ok' : 'danger')}>wiadomości {has('messaging') ? 'OK' : 'brak'}</span>
+          <span className={'badge ' + (has('account_status') ? 'ok' : 'danger')}>stan kont {has('account_status') ? 'OK' : 'brak'}</span>
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--dim2)' }}>razem: {res.webhooks.length}</span>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function IntegrationsAdmin() {
   const [cfg, setCfg] = useState(null)
@@ -211,6 +249,7 @@ export default function IntegrationsAdmin() {
                       }
                     />
                   </label>
+                  <UnipileWebhooks />
                 </>
               )}
 

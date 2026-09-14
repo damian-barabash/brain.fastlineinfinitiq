@@ -1,7 +1,14 @@
-// brain-hook — webhook Meta (Messenger / Instagram DM / WhatsApp Cloud API).
-// GET  = weryfikacja subskrypcji (hub.challenge, verify_token z configu kanału)
-// POST = przyjęcie wiadomości → brain-chat (stream:false) → odpowiedź przez Graph API.
-// Kanał znajdywany po page_id / ig_id / phone_number_id zapisanych w brain_channels.config.
+// brain-hook — webhooki kanałów rozmów.
+//  A) Meta (Messenger / Instagram DM / WhatsApp Cloud API) — własna aplikacja Meta klienta:
+//     GET  = weryfikacja subskrypcji (hub.challenge, verify_token z configu kanału)
+//     POST = przyjęcie wiadomości → brain-chat (stream:false) → odpowiedź przez Graph API.
+//     Kanał znajdywany po page_id / ig_id / phone_number_id zapisanych w brain_channels.config.
+//  B) Unipile (od 2026-09-14) — konta WhatsApp / Instagram / LinkedIn / Messenger / Telegram,
+//     które klient podłącza SAM jednym linkiem (/connect?t=…), bez tokenów Meta:
+//     ?hook=unipile        = wiadomość przychodząca (jeden webhook „messaging" na całą instalację)
+//     ?hook=unipile-status = zmiana stanu konta (CREDENTIALS / DELETED / OK …)
+//     ?hook=unipile-auth   = notify_url kreatora Hosted Auth (konto podłączone → przypisanie do projektu)
+//     Autoryzacja: ?key=UNIPILE_HOOK_KEY (albo nagłówek x-hook-key).
 //
 // v4 (2026-09-01), przed pierwszym realnym podłączeniem kanałów:
 //  • Graph API v21 → v23 (v21 kończy wsparcie),
@@ -64,12 +71,12 @@ async function seenBefore(projectId: string | null, mid: string): Promise<boolea
   return false; // błąd zapisu nie może blokować odpowiedzi klientowi
 }
 
-async function askBrain(publicKey: string, text: string, visitorId: string): Promise<string> {
+async function askBrain(publicKey: string, text: string, visitorId: string, channelType?: string): Promise<string> {
   try {
     const r = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/brain-chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: publicKey, message: text, visitor_id: visitorId, stream: false }),
+      body: JSON.stringify({ key: publicKey, message: text, visitor_id: visitorId, stream: false, channel_type: channelType }),
       signal: AbortSignal.timeout(100_000),
     });
     if (!r.ok) {
@@ -244,8 +251,358 @@ async function handleWhatsApp(bodyObj: Record<string, unknown>, raw: string, sig
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Unipile — kanały podłączone przez klienta jednym linkiem
+// ═══════════════════════════════════════════════════════════════════════════
+// Unipile „udaje" konto klienta (WhatsApp jak WhatsApp Web, Instagram/LinkedIn jak
+// zalogowana sesja), więc każde konto ma swojego właściciela-projekt w
+// fiq_project_accounts. Trasa wiadomości przychodzącej:
+//   1. LinkedIn i nadawca jest leadem Łowcy (hand_leads.li_urn)  → hand-api (Łowca odpowiada sam),
+//   2. nadawca jest leadem Sprzedawcy (chat_id / attendee / numer) → brain-sales,
+//   3. projekt ma WŁĄCZONY kanał doradcy dla tego konta            → brain-chat + odpowiedź,
+//   4. nikt inny → Sprzedawca zakłada ciepłego leada (jak przy mailu), jeśli ma to włączone.
+const UNI_HOOK_KEY = Deno.env.get("UNIPILE_HOOK_KEY") ?? "";
+const PROVIDER_CHANNEL: Record<string, string> = {
+  WHATSAPP: "whatsapp", INSTAGRAM: "instagram", LINKEDIN: "linkedin", MESSENGER: "messenger", TELEGRAM: "telegram",
+};
+const PROVIDER_LABEL: Record<string, string> = {
+  WHATSAPP: "WhatsApp", INSTAGRAM: "Instagram", LINKEDIN: "LinkedIn", MESSENGER: "Messenger", TELEGRAM: "Telegram",
+};
+// twarde limity długości wiadomości u dostawców (z zapasem)
+const UNI_MAX: Record<string, number> = { WHATSAPP: 4000, INSTAGRAM: 950, LINKEDIN: 7900, MESSENGER: 1900, TELEGRAM: 4000 };
+// Bezpieczniki. Doradca tylko ODPOWIADA, ale pętla z cudzym botem albo tysiąc
+// wiadomości z jednego czatu zamieniłyby konto klienta w karabin — a Unipile
+// ostrzega, że takie konta dostają blokadę.
+const UNI_REPLIES_PER_CHAT_H = 12;
+const UNI_REPLIES_PER_ACCOUNT_DAY = 400;
+const UNI_REPLY_DELAY_MS: [number, number] = [1500, 4000]; // „człowiek nie odpisuje w 200 ms"
+
+type AccountRow = {
+  id: string; project_id: string; provider: string; account_id: string; account_name: string;
+  provider_user_id: string; status: string; connected_at: string;
+};
+
+async function unipileCfg() {
+  const { data } = await db.from("brain_settings").select("value").eq("key", "unipile").maybeSingle();
+  const cfg = (data?.value ?? {}) as Record<string, string>;
+  const token = (cfg.api_key || "").trim() || Deno.env.get((cfg.key_secret || "UNIPILE_TOKEN").trim()) || "";
+  const dsn = String(cfg.dsn ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return { dsn, token, ready: !!(dsn && token) };
+}
+
+async function uniFetch(path: string, init: RequestInit = {}, timeout = 25_000): Promise<Record<string, unknown>> {
+  const { dsn, token, ready } = await unipileCfg();
+  if (!ready) throw new Error("Unipile nieskonfigurowane (DSN/token w Admin → Integracje)");
+  const headers: Record<string, string> = { "X-API-KEY": token, accept: "application/json", ...((init.headers as Record<string, string>) ?? {}) };
+  // FormData ustawia własny Content-Type z boundary — ręczny nagłówek by go zepsuł
+  if (!(init.body instanceof FormData)) headers["Content-Type"] = "application/json";
+  const r = await fetch(`https://${dsn}/api/v1${path}`, { ...init, headers, signal: AbortSignal.timeout(timeout) });
+  const text = await r.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text.slice(0, 300) };
+  }
+  if (!r.ok) throw new Error(`Unipile ${r.status}: ${text.slice(0, 200)}`);
+  return data;
+}
+
+async function uniSend(chatId: string, accountId: string, provider: string, text: string) {
+  const fd = new FormData();
+  fd.set("text", text.slice(0, UNI_MAX[provider] ?? 1900));
+  fd.set("account_id", accountId);
+  // WhatsApp: „pisze…" przez chwilę zależną od długości — wygląda jak człowiek
+  if (provider === "WHATSAPP") fd.set("typing_duration", String(Math.min(5000, Math.max(1200, text.length * 35))));
+  return await uniFetch(`/chats/${encodeURIComponent(chatId)}/messages`, { method: "POST", body: fd }, 30_000);
+}
+
+const digits = (s: string) => String(s ?? "").replace(/[^\d]/g, "");
+// ten sam uczestnik? id dosłownie albo (WhatsApp) ten sam numer w innym zapisie
+function sameActor(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const da = digits(a.split("@")[0]);
+  const db_ = digits(b.split("@")[0]);
+  return da.length >= 8 && da === db_;
+}
+
+async function uniAccountRow(accountId: string): Promise<AccountRow | null> {
+  const { data } = await db.from("fiq_project_accounts").select("*").eq("account_id", accountId).maybeSingle();
+  return (data ?? null) as AccountRow | null;
+}
+
+async function uniBudgetOk(acc: AccountRow, chatId: string): Promise<boolean> {
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const dayAgo = new Date(Date.now() - 86400_000).toISOString();
+  const [{ count: perChat }, { count: perAcc }] = await Promise.all([
+    db.from("brain_events").select("id", { count: "exact", head: true }).eq("type", "uni_reply").eq("data->>chat_id", chatId).gte("created_at", hourAgo),
+    db.from("brain_events").select("id", { count: "exact", head: true }).eq("type", "uni_reply").eq("data->>account_id", acc.account_id).gte("created_at", dayAgo),
+  ]);
+  if ((perChat ?? 0) >= UNI_REPLIES_PER_CHAT_H) {
+    console.error("unipile: limit odpowiedzi w czacie", chatId);
+    await logEvent(acc.project_id, "uni_rate_limit", { account_id: acc.account_id, chat_id: chatId, scope: "chat" });
+    return false;
+  }
+  if ((perAcc ?? 0) >= UNI_REPLIES_PER_ACCOUNT_DAY) {
+    console.error("unipile: dobowy limit odpowiedzi konta", acc.account_id);
+    await logEvent(acc.project_id, "uni_rate_limit", { account_id: acc.account_id, scope: "account" });
+    return false;
+  }
+  return true;
+}
+
+async function replyUni(acc: AccountRow, chatId: string, text: string, count = false) {
+  const [lo, hi] = UNI_REPLY_DELAY_MS;
+  await new Promise((r) => setTimeout(r, lo + Math.random() * (hi - lo)));
+  try {
+    await uniSend(chatId, acc.account_id, acc.provider, text);
+    if (count) await logEvent(acc.project_id, "uni_reply", { account_id: acc.account_id, chat_id: chatId, provider: acc.provider });
+  } catch (e) {
+    console.error("unipile send error", acc.provider, String(e).slice(0, 300));
+    await logEvent(acc.project_id, "send_error", { channel: PROVIDER_CHANNEL[acc.provider] ?? "unipile", via: "unipile", error: String(e).slice(0, 300) });
+  }
+}
+
+async function findSalesLead(acc: AccountRow, chatId: string, senderId: string): Promise<Record<string, unknown> | null> {
+  const pid = acc.project_id;
+  let res = await db.from("brain_leads").select("*").eq("project_id", pid).eq("meta->>unipile_chat_id", chatId).limit(1);
+  if (res.data?.length) return res.data[0];
+  res = await db.from("brain_leads").select("*").eq("project_id", pid).eq("meta->>unipile_attendee", senderId).limit(1);
+  if (res.data?.length) return res.data[0];
+  if (acc.provider === "WHATSAPP") {
+    // lead wgrany z numerem, do którego jeszcze nie pisaliśmy (albo pisaliśmy przez Cloud API)
+    const phone = digits(senderId.split("@")[0]);
+    if (phone.length >= 8) {
+      const { data: leads } = await db.from("brain_leads").select("*").eq("project_id", pid).neq("phone", "").limit(2000);
+      const cands = (leads ?? []).filter((l) => {
+        const d = digits(String(l.phone));
+        return d === phone || d.replace(/^0+/, "") === phone.replace(/^48/, "") || (phone.endsWith(d) && d.length >= 9);
+      });
+      if (cands.length === 1) return cands[0];
+    }
+  }
+  return null;
+}
+
+async function forwardHand(payload: Record<string, unknown>) {
+  try {
+    const r = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/hand-api`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-hand-key": Deno.env.get("HAND_CRON_KEY") ?? "" },
+      body: JSON.stringify({ action: "webhook", payload }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!r.ok) console.error("hand-api webhook", r.status, (await r.text().catch(() => "")).slice(0, 200));
+  } catch (e) {
+    console.error("hand-api unreachable", String(e).slice(0, 200));
+  }
+}
+
+async function forwardSales(payload: Record<string, unknown>) {
+  try {
+    const r = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/brain-sales?hook=unipile&key=${encodeURIComponent(UNI_HOOK_KEY)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!r.ok) console.error("brain-sales unipile", r.status, (await r.text().catch(() => "")).slice(0, 200));
+  } catch (e) {
+    console.error("brain-sales unreachable", String(e).slice(0, 200));
+  }
+}
+
+async function handleUnipileMessage(body: Record<string, unknown>) {
+  const event = String(body.event ?? "message_received");
+  if (event !== "message_received") return;
+  const accountId = String(body.account_id ?? "");
+  const chatId = String(body.chat_id ?? "");
+  const messageId = String(body.message_id ?? "");
+  const sender = (body.sender ?? {}) as Record<string, unknown>;
+  const senderId = String(sender.attendee_provider_id ?? "");
+  const senderName = String(sender.attendee_name ?? "");
+  const ownId = String(((body.account_info ?? {}) as Record<string, unknown>).user_id ?? "");
+  if (!accountId || !chatId || !senderId) return;
+
+  const acc = await uniAccountRow(accountId);
+  if (!acc) {
+    console.error("unipile: konto bez projektu", accountId);
+    await logEvent(null, "hook_unmatched", { kind: "unipile", accountId });
+    return;
+  }
+  const provider = acc.provider;
+  // własne wiadomości (z telefonu, z innego urządzenia, z API) też przychodzą jako message_received
+  if (sameActor(senderId, ownId) || sameActor(senderId, acc.provider_user_id)) return;
+  // grupy: doradca w grupie rodzinnej klienta to katastrofa — odpowiadamy tylko 1:1
+  const attendees = (body.attendees ?? []) as Record<string, unknown>[];
+  const others = attendees.filter((a) => {
+    const id = String(a.attendee_provider_id ?? "");
+    return id && !sameActor(id, ownId) && !sameActor(id, acc.provider_user_id);
+  });
+  if (body.is_group === true || others.length > 1) return;
+  if (await seenBefore(acc.project_id, `uni:${messageId || `${chatId}:${body.timestamp ?? ""}`}`)) return;
+
+  const text = String(body.message ?? "").trim();
+  const hasAttachments = Array.isArray(body.attachments) && (body.attachments as unknown[]).length > 0;
+  const channel = PROVIDER_CHANNEL[provider] ?? "unipile";
+
+  // 1) LinkedIn: lead Łowcy → Łowca prowadzi rozmowę sam
+  if (provider === "LINKEDIN") {
+    const { data: hl } = await db.from("hand_leads").select("id").eq("project_id", acc.project_id).eq("li_urn", senderId).limit(1);
+    if (hl?.length) {
+      await forwardHand(body);
+      return;
+    }
+  }
+  // 2) lead Sprzedawcy
+  const lead = await findSalesLead(acc, chatId, senderId);
+  const salesPayload = {
+    project_id: acc.project_id, lead_id: lead ? String(lead.id) : null, channel, provider,
+    chat_id: chatId, account_id: accountId, sender_id: senderId, sender_name: senderName, text, message_id: messageId,
+    attachments: hasAttachments,
+  };
+  if (lead) {
+    await forwardSales(salesPayload);
+    return;
+  }
+  // 3) doradca — kanał tego konta włączony w Integracjach
+  const { data: chRows } = await db
+    .from("brain_channels").select("id, public_key, enabled").eq("project_id", acc.project_id).eq("type", "unipile")
+    .contains("config", { account_id: accountId }).limit(1);
+  const ch = chRows?.[0];
+  if (ch?.enabled) {
+    if (!text) {
+      if (hasAttachments) await replyUni(acc, chatId, NO_TEXT_REPLY);
+      return;
+    }
+    if (!(await uniBudgetOk(acc, chatId))) return;
+    const reply = await askBrain(ch.public_key, text, `${channel}:${senderId}`, channel);
+    if (reply) await replyUni(acc, chatId, reply, true);
+    else await logEvent(acc.project_id, "no_reply", { kind: "unipile", provider, reason: "brain-chat zwrócił pusto" });
+    return;
+  }
+  // 4) doradca wyłączony → Sprzedawca może przyjąć nowego (decyduje jego konfiguracja).
+  //    LinkedIn wyjątkowo NIE: to prywatna skrzynka właściciela — odpowiadamy tam tylko
+  //    leadom Łowcy/Sprzedawcy albo gdy właściciel świadomie włączył doradcę na tym koncie.
+  if (text && provider !== "LINKEDIN") await forwardSales(salesPayload);
+  else await logEvent(acc.project_id, "uni_no_route", { provider, chat_id: chatId, reason: provider === "LINKEDIN" ? "linkedin bez doradcy" : "bez tekstu" });
+}
+
+// Stan konta (CREDENTIALS = klient wylogował / zmienił hasło, DELETED = usunięte u Unipile).
+// Panel pokazuje „Podłącz ponownie", a wysyłka omija konta poza OK.
+async function handleUnipileStatus(body: Record<string, unknown>) {
+  const st = ((body.AccountStatus ?? body) as Record<string, unknown>);
+  const accountId = String(st.account_id ?? "");
+  const status = String(st.message ?? st.status ?? "").toUpperCase();
+  if (!accountId || !status) return;
+  const acc = await uniAccountRow(accountId);
+  if (!acc) return;
+  const mapped = /SUCCESS|RECONNECTED|^OK$/.test(status) ? "OK" : status;
+  const now = new Date().toISOString();
+  await db.from("fiq_project_accounts").update({ status: mapped, status_at: now, updated_at: now }).eq("id", acc.id);
+  await logEvent(acc.project_id, "account_status", { account_id: accountId, provider: acc.provider, status });
+}
+
+// notify_url kreatora Hosted Auth: {status, account_id, name} — `name` to nasz token linku.
+async function handleUnipileAuth(body: Record<string, unknown>) {
+  const status = String(body.status ?? "").toUpperCase();
+  const token = String(body.name ?? "");
+  const accountId = String(body.account_id ?? "");
+  console.log("unipile auth", status, token.slice(0, 8), accountId);
+  if (!token || !accountId) return;
+  const { data: linkRow } = await db.from("fiq_connect_links").select("*").eq("token", token).maybeSingle();
+  if (!linkRow) {
+    await logEvent(null, "uni_auth_unknown_token", { token: token.slice(0, 8), accountId });
+    return;
+  }
+  if (!/SUCCESS|RECONNECT|CREATED/.test(status)) return;
+  // szczegóły konta: typ (provider), nazwa, własny identyfikator (do odsiewania własnych wiadomości)
+  let a: Record<string, unknown> = {};
+  for (let i = 0; i < 3 && !a.type; i++) {
+    try {
+      a = await uniFetch(`/accounts/${encodeURIComponent(accountId)}`, {}, 15_000);
+    } catch (e) {
+      console.error("unipile account fetch", i, String(e).slice(0, 160));
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  const provider = String(a.type ?? "").toUpperCase();
+  if (!PROVIDER_CHANNEL[provider]) {
+    await logEvent(linkRow.project_id, "uni_auth_unsupported", { accountId, type: provider || "?" });
+    return;
+  }
+  const im = ((a.connection_params ?? {}) as Record<string, Record<string, unknown>>).im ?? {};
+  const name = String(a.name ?? im.username ?? "");
+  const ownId = String(im.id ?? im.phone_number ?? "");
+  const now = new Date().toISOString();
+  const { error } = await db.from("fiq_project_accounts").upsert({
+    project_id: linkRow.project_id, provider, account_id: accountId, account_name: name, provider_user_id: ownId,
+    status: "OK", status_at: now, connected_at: now, link_token: token, updated_at: now,
+  }, { onConflict: "account_id" });
+  if (error) {
+    console.error("fiq_project_accounts upsert", error.message);
+    await logEvent(linkRow.project_id, "uni_auth_error", { accountId, error: error.message });
+    return;
+  }
+  const accounts = Array.isArray(linkRow.accounts) ? (linkRow.accounts as unknown[]) : [];
+  await db.from("fiq_connect_links").update({
+    connected_at: now, account_id: accountId, account_name: name, updated_at: now,
+    accounts: [...accounts.filter((x) => (x as Record<string, unknown>).account_id !== accountId), { account_id: accountId, provider, name, at: now }],
+  }).eq("token", token);
+  // Łowca czyta konto LinkedIn ze swojej konfiguracji — trzymamy ją w zgodzie
+  if (provider === "LINKEDIN") {
+    const { data: hc } = await db.from("hand_config").select("config").eq("project_id", linkRow.project_id).maybeSingle();
+    const cfg = { ...((hc?.config ?? {}) as Record<string, unknown>), unipile_account_id: accountId };
+    await db.from("hand_config").upsert({ project_id: linkRow.project_id, config: cfg, updated_at: now });
+  }
+  // kanał doradcy dla tego konta: WhatsApp/Instagram/Messenger/Telegram od razu włączony,
+  // LinkedIn WYŁĄCZONY — to prywatna skrzynka właściciela, a leady LinkedIn prowadzi Łowca
+  const { data: existing } = await db.from("brain_channels").select("id").eq("project_id", linkRow.project_id).eq("type", "unipile")
+    .contains("config", { account_id: accountId }).limit(1);
+  if (!existing?.length) {
+    await db.from("brain_channels").insert({
+      project_id: linkRow.project_id, type: "unipile", name: `${PROVIDER_LABEL[provider]} · ${name || accountId}`,
+      enabled: provider !== "LINKEDIN", config: { account_id: accountId, provider },
+    });
+  }
+  await db.from("brain_settings").delete().eq("key", "unipile_status");
+  await logEvent(linkRow.project_id, "account_connected", { account_id: accountId, provider, name });
+  console.log("konto podłączone", linkRow.project_id, provider, accountId, name);
+}
+
 Deno.serve(async (req) => {
   const url = new URL(req.url);
+
+  // ── Unipile (klucz w query, bo notify_url kreatora nie umie nagłówków) ──
+  const hook = url.searchParams.get("hook") ?? "";
+  if (hook.startsWith("unipile")) {
+    const key = url.searchParams.get("key") ?? req.headers.get("x-hook-key") ?? "";
+    if (!UNI_HOOK_KEY || key !== UNI_HOOK_KEY) return new Response("forbidden", { status: 403 });
+    if (req.method !== "POST") return new Response("method", { status: 405 });
+    const raw = await req.text();
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    console.log(`${hook} in:`, raw.slice(0, 1200));
+    const work = (async () => {
+      try {
+        if (hook === "unipile") await handleUnipileMessage(body);
+        else if (hook === "unipile-status") await handleUnipileStatus(body);
+        else if (hook === "unipile-auth") await handleUnipileAuth(body);
+      } catch (e) {
+        console.error("unipile hook error", e);
+        await logEvent(null, "hook_error", { hook, error: String(e).slice(0, 300) });
+      }
+    })();
+    // @ts-ignore EdgeRuntime dostępny w środowisku Supabase
+    if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(work);
+    else await work;
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
 
   // Weryfikacja Meta: GET z hub.mode/hub.verify_token/hub.challenge
   if (req.method === "GET") {

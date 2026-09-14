@@ -267,7 +267,7 @@ async function ensureConversation(
   return data!.id;
 }
 
-type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string };
+type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string; api_key?: string };
 
 function providerConfig(ai: AiCfg) {
   let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
@@ -543,11 +543,16 @@ Deno.serve(async (req) => {
   const visitorId = String(body.visitor_id || "anon").slice(0, 80);
   const wantStream = body.stream !== false;
 
+  // kanał „unipile" to konto klienta u dostawcy — w statystykach ma się liczyć jako
+  // WhatsApp/Instagram/LinkedIn, więc brain-hook podaje faktyczny typ rozmowy
+  const channelType = ctx.channel.type === "unipile" && typeof body.channel_type === "string" && /^[a-z]{3,12}$/.test(body.channel_type)
+    ? body.channel_type
+    : ctx.channel.type;
   const cid = await ensureConversation(
     body.conversation_id as string | undefined,
     ctx.project.id,
     ctx.channel.id,
-    ctx.channel.type,
+    channelType,
     visitorId,
   );
 
@@ -605,7 +610,7 @@ Deno.serve(async (req) => {
         project_id: ctx.project.id,
         conversation_id: cid,
         type: "handoff",
-        data: { channel: ctx.channel.type },
+        data: { channel: channelType },
       });
     }
     return { clean, redirected, latency, messageId: inserted?.id ?? null };

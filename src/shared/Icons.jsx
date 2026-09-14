@@ -323,6 +323,12 @@ export const IcSearch = (p) => (
     <path d="M21 21l-4.3-4.3" />
   </I>
 )
+export const IcTelegram = (p) => (
+  <I {...p}>
+    <path d="M20.5 4.5L3.5 11l5.5 2 2 5.5 3-3.5 4 3z" />
+    <path d="M9 13l8-6" strokeWidth="1.4" />
+  </I>
+)
 export const IcLinkedIn = (p) => (
   <I {...p}>
     <rect x="3" y="3" width="18" height="18" rx="2" />
