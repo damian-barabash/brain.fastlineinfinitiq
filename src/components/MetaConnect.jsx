@@ -59,14 +59,14 @@ export default function MetaConnect({ projectId, onChange }) {
       <span className="corner br" />
       <div className="row" style={{ marginBottom: 8 }}>
         <IcFacebook style={{ width: 18, height: 18, color: 'var(--acid)' }} />
-        <b>Messenger strony firmowej i Instagram Business — przez Facebooka</b>
+        <b>Messenger strony firmowej — przez Facebooka</b>
         <button className="btn sm right" onClick={load} disabled={!!busy} title="Odśwież">
           <IcRefresh /> Odśwież
         </button>
       </div>
       <p className="muted" style={{ marginBottom: 12 }}>
         Jedno kliknięcie: okno Facebooka, wybór strony, „Zezwól". Tokeny i webhook ustawiamy sami — nic nie wklejasz.
-        Jeśli strona ma połączone konto Instagram (profesjonalne), podłączy się razem z nią.
+        Instagram podłącza się osobno, linkiem w karcie „Kanały klienta" wyżej.
       </p>
 
       {st === null && <p className="muted">Sprawdzam…</p>}

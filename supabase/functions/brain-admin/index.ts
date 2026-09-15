@@ -453,7 +453,9 @@ const GRAPH = "https://graph.facebook.com/v23.0";
 const META_APP_ID = Deno.env.get("META_APP_ID") ?? "";
 const META_APP_SECRET = Deno.env.get("META_APP_SECRET") ?? "";
 const META_LOGIN_CONFIG_ID = Deno.env.get("META_LOGIN_CONFIG_ID") ?? "";
-const META_SCOPES = "pages_show_list,pages_messaging,pages_manage_metadata,business_management,instagram_basic,instagram_manage_messages";
+// tylko to, co Messenger strony naprawdę potrzebuje — każde dodatkowe uprawnienie to osobny punkt App Review
+// (Instagram klienci podłączają przez Unipile, business_management nie jest do niczego potrzebne)
+const META_SCOPES = "pages_show_list,pages_messaging,pages_manage_metadata";
 const META_STATE_TTL_MS = 15 * 60_000;
 
 async function hmacHex(secret: string, text: string) {
@@ -713,11 +715,12 @@ Deno.serve(async (req) => {
           const userToken = String(longTok.access_token ?? tok.access_token ?? "");
           const me = await graph("/me", { fields: "id,name", access_token: userToken });
           const acc = await graph("/me/accounts", {
-            fields: "id,name,access_token,tasks,instagram_business_account{id,username}", limit: "100", access_token: userToken,
+            fields: "id,name,access_token,tasks", limit: "100", access_token: userToken,
           });
           const pages: MetaPage[] = ((acc.data ?? []) as Array<Record<string, unknown>>).map((p) => ({
             id: String(p.id), name: String(p.name ?? ""), access_token: String(p.access_token ?? ""), tasks: (p.tasks as string[]) ?? [],
-            ig: p.instagram_business_account ? { id: String((p.instagram_business_account as Record<string, unknown>).id), username: String((p.instagram_business_account as Record<string, unknown>).username ?? "") } : null,
+            // instagram_business_account wymagałby uprawnień IG — Instagram podłączamy przez Unipile
+            ig: null,
           }));
           // tokeny stron zostają po stronie serwera; panel dostaje tylko nazwy
           await db.from("fiq_project_integrations").upsert({
