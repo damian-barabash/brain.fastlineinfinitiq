@@ -11,11 +11,11 @@ import { api, session } from './platform.js'
 import { IcWhatsApp, IcInstagram, IcLinkedIn, IcFacebook, IcTelegram, IcCheck, IcCopy, IcRefresh, IcTrash, IcLink, IcShield } from './Icons.jsx'
 
 export const PROVIDERS = [
-  { key: 'WHATSAPP', label: 'WhatsApp', icon: IcWhatsApp, how: 'skan kodu QR w aplikacji WhatsApp (jak WhatsApp Web)' },
-  { key: 'INSTAGRAM', label: 'Instagram', icon: IcInstagram, how: 'login i hasło Instagrama, kod 2FA jeśli włączony' },
-  { key: 'LINKEDIN', label: 'LinkedIn', icon: IcLinkedIn, how: 'login i hasło LinkedIna, potwierdzenie w aplikacji' },
-  { key: 'TELEGRAM', label: 'Telegram', icon: IcTelegram, how: 'numer telefonu i kod z Telegrama' },
-  { key: 'MESSENGER', label: 'Messenger', icon: IcFacebook, how: 'login do Facebooka (konto prywatne; u dostawcy bez dalszego rozwoju)', warn: true },
+  { key: 'WHATSAPP', label: 'WhatsApp', icon: IcWhatsApp, how: 'klient skanuje kod QR telefonem z numerem firmowym (WhatsApp lub WhatsApp Business)' },
+  { key: 'INSTAGRAM', label: 'Instagram', icon: IcInstagram, how: 'login i hasło konta firmowego (nie przez Facebooka — konto musi mieć własne hasło), kod 2FA jeśli włączony' },
+  { key: 'LINKEDIN', label: 'LinkedIn', icon: IcLinkedIn, how: 'profil osoby (na LinkedInie piszą ludzie, nie strony), potwierdzenie w aplikacji' },
+  { key: 'TELEGRAM', label: 'Telegram', icon: IcTelegram, how: 'numer telefonu (firmowy) i kod z Telegrama' },
+  { key: 'MESSENGER', label: 'Messenger', icon: IcFacebook, how: 'PRYWATNA skrzynka Messengera osoby, nie strona firmowa (stronę podłącza się przez aplikację Meta w „Zaawansowane”); u dostawcy bez dalszego rozwoju', warn: true },
 ]
 export const providerMeta = (key) => PROVIDERS.find((p) => p.key === key) ?? { key, label: key, icon: IcLink, how: '' }
 
@@ -254,6 +254,10 @@ export default function ChannelsConnect({
                   </button>
                 ))}
               </div>
+              <p className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+                Podłącza się KONTO, którym klient się zaloguje: WhatsApp — telefon z numerem firmowym; Instagram — login konta
+                firmowego (nie „przez Facebooka”); Messenger — skrzynka prywatna osoby, stronę firmową podłącza się przez aplikację Meta.
+              </p>
               <button className="btn primary" onClick={() => makeLink('create')} disabled={busy === 'link' || chosen.size === 0}>
                 <IcLink style={{ width: 15, height: 15 }} /> {busy === 'link' ? 'Generuję…' : 'Wygeneruj link dla klienta'}
               </button>

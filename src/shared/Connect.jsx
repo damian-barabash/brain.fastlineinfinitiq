@@ -9,11 +9,11 @@ import { IcCheck, IcShield, IcGlobe, IcLink, IcWhatsApp, IcInstagram, IcLinkedIn
 
 const ICON = { WHATSAPP: IcWhatsApp, INSTAGRAM: IcInstagram, LINKEDIN: IcLinkedIn, MESSENGER: IcFacebook, TELEGRAM: IcTelegram }
 const HOW = {
-  WHATSAPP: 'zeskanujesz kod QR w aplikacji WhatsApp — dokładnie jak przy WhatsApp Web',
-  INSTAGRAM: 'zalogujesz się do Instagrama (jeśli masz 2FA — podasz kod z aplikacji)',
-  LINKEDIN: 'zalogujesz się do LinkedIna i potwierdzisz logowanie w aplikacji',
-  MESSENGER: 'zalogujesz się do Facebooka',
-  TELEGRAM: 'podasz numer telefonu i kod z Telegrama',
+  WHATSAPP: 'zeskanujesz kod QR telefonem z numerem FIRMOWYM (zwykły WhatsApp albo WhatsApp Business) — dokładnie jak przy WhatsApp Web',
+  INSTAGRAM: 'zalogujesz się loginem i hasłem konta FIRMOWEGO (nie „przez Facebooka” — jeśli konto nie ma własnego hasła, ustaw je w Instagramie: Centrum kont → Hasło); przy 2FA podasz kod',
+  LINKEDIN: 'zalogujesz się na swój profil (na LinkedInie piszą ludzie, nie strony) i potwierdzisz logowanie w aplikacji',
+  MESSENGER: 'zalogujesz się do Facebooka — podłącza to Twoją PRYWATNĄ skrzynkę Messengera, nie stronę firmową (stronę podłącza opiekun przez aplikację Meta)',
+  TELEGRAM: 'podasz numer telefonu (firmowy) i kod z Telegrama',
 }
 
 async function call(action, t) {

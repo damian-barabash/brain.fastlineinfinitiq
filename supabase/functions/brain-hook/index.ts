@@ -103,6 +103,9 @@ async function logEvent(projectId: string | null, type: string, data: Record<str
 // Podpis Meta liczony jest z surowego ciała żądania. app_secret jest opcjonalny —
 // gdy go nie ma w configu kanału, zachowujemy się jak dotąd (wpuszczamy).
 async function signatureOk(raw: string, header: string | null, appSecret?: string): Promise<boolean> {
+  // kanały podłączone przez OAuth naszej aplikacji „Infinitiq" nie mają własnego app_secret —
+  // podpis sprawdzamy sekretem aplikacji platformy
+  appSecret = appSecret || Deno.env.get("META_APP_SECRET") || "";
   if (!appSecret) return true;
   if (!header?.startsWith("sha256=")) return false;
   const key = await crypto.subtle.importKey(
@@ -610,6 +613,10 @@ Deno.serve(async (req) => {
     const token = url.searchParams.get("hub.verify_token") ?? "";
     const challenge = url.searchParams.get("hub.challenge") ?? "";
     if (mode === "subscribe" && token) {
+      // token na poziomie APLIKACJI (jedna aplikacja Meta „Infinitiq" dla wszystkich klientów —
+      // strony podpinają się przez OAuth) albo stary token z konfiguracji kanału
+      const appToken = Deno.env.get("META_VERIFY_TOKEN") ?? "";
+      if (appToken && token === appToken) return new Response(challenge, { status: 200 });
       const ch = await findChannel("verify_token", token);
       if (ch) return new Response(challenge, { status: 200 });
       console.error("hook: weryfikacja odrzucona — nieznany verify_token");

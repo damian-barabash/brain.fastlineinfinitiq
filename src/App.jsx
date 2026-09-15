@@ -9,6 +9,7 @@ const WidgetFrame = lazy(() => import('./pages/WidgetFrame.jsx'))
 const Demo = lazy(() => import('./pages/Demo.jsx'))
 const SalesDemo = lazy(() => import('./pages/SalesDemo.jsx'))
 const Connect = lazy(() => import('./shared/Connect.jsx'))
+const MetaCallback = lazy(() => import('./pages/MetaCallback.jsx'))
 
 function Guard({ children, needProject }) {
   const loc = useLocation()
@@ -32,6 +33,15 @@ export default function App() {
           element={
             <Guard>
               <Picker />
+            </Guard>
+          }
+        />
+        {/* powrót z OAuth Facebooka — wybór strony; wymaga sesji i projektu */}
+        <Route
+          path="/meta/callback"
+          element={
+            <Guard needProject>
+              <MetaCallback />
             </Guard>
           }
         />

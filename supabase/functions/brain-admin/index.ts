@@ -441,6 +441,66 @@ async function hostedAuthUrl(link: ConnectLink): Promise<string> {
   return url;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Meta (Messenger strony firmowej + Instagram Business) — OAuth przez NASZĄ aplikację
+// „Infinitiq" (2026-09-15). Unipile nie umie stron Facebooka (tylko skrzynka prywatna),
+// więc klient klika „Połącz przez Facebooka", wybiera stronę, a my dostajemy Page Access
+// Token, zapisujemy kanał i SAMI subskrybujemy webhook strony. Zero tokenów u klienta.
+// Jedna aplikacja Meta na całą platformę: sekrety META_APP_ID / META_APP_SECRET,
+// opcjonalnie META_LOGIN_CONFIG_ID (Facebook Login for Business → konfiguracja).
+// ═══════════════════════════════════════════════════════════════════════════
+const GRAPH = "https://graph.facebook.com/v23.0";
+const META_APP_ID = Deno.env.get("META_APP_ID") ?? "";
+const META_APP_SECRET = Deno.env.get("META_APP_SECRET") ?? "";
+const META_LOGIN_CONFIG_ID = Deno.env.get("META_LOGIN_CONFIG_ID") ?? "";
+const META_SCOPES = "pages_show_list,pages_messaging,pages_manage_metadata,business_management,instagram_basic,instagram_manage_messages";
+const META_STATE_TTL_MS = 15 * 60_000;
+
+async function hmacHex(secret: string, text: string) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+// state = project_id.ts.nonce.podpis — bez tabeli, a nie da się podstawić cudzego projektu
+async function metaState(projectId: string) {
+  const body = `${projectId}.${Date.now()}.${crypto.randomUUID().slice(0, 8)}`;
+  return `${body}.${await hmacHex(META_APP_SECRET, body)}`;
+}
+async function metaStateProject(state: string): Promise<string | null> {
+  const parts = String(state ?? "").split(".");
+  if (parts.length !== 4) return null;
+  const [pid, ts, nonce, sig] = parts;
+  if (Date.now() - Number(ts) > META_STATE_TTL_MS) return null;
+  return (await hmacHex(META_APP_SECRET, `${pid}.${ts}.${nonce}`)) === sig ? pid : null;
+}
+function metaRedirect(origin: string) {
+  const o = String(origin ?? "").replace(/\/+$/, "");
+  return `${ORIGINS.has(o) ? o : "https://brain.fastlineinfinitiq.pl"}/meta/callback`;
+}
+async function graph(path: string, params: Record<string, string>, init: RequestInit = {}) {
+  const url = new URL(`${GRAPH}${path}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(20_000) });
+  const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!r.ok || data.error) {
+    const e = (data.error ?? {}) as Record<string, unknown>;
+    throw new Error(`Meta ${r.status}: ${String(e.message ?? JSON.stringify(data)).slice(0, 220)}`);
+  }
+  return data;
+}
+type MetaPage = { id: string; name: string; access_token: string; ig?: { id: string; username: string } | null; tasks?: string[] };
+async function metaPending(projectId: string) {
+  const { data } = await db.from("fiq_project_integrations").select("config").eq("project_id", projectId).eq("kind", "meta_oauth").maybeSingle();
+  return (data?.config ?? null) as { pages: MetaPage[]; at: string; user_id?: string; user_name?: string } | null;
+}
+async function metaPagesConnected(projectId: string) {
+  const { data } = await db.from("brain_channels").select("id, type, name, enabled, config, created_at").eq("project_id", projectId).in("type", ["facebook", "instagram"]);
+  return (data ?? []).filter((c) => (c.config as Record<string, unknown>)?.oauth).map((c) => {
+    const cfg = c.config as Record<string, string>;
+    return { id: c.id, type: c.type, name: c.name, enabled: c.enabled, page_id: cfg.page_id, ig_id: cfg.ig_id ?? "", ig_username: cfg.ig_username ?? "", connected_at: cfg.connected_at ?? c.created_at };
+  });
+}
+
 async function connectInfo(link: ConnectLink) {
   const { data: proj } = await db.from("brain_projects").select("name, workspace_id").eq("id", link.project_id).maybeSingle();
   const { data: ws } = proj
@@ -608,6 +668,124 @@ Deno.serve(async (req) => {
         await db.from("brain_settings").delete().eq("key", "unipile_status");
         return J({ ok: true });
       }
+      // ── Meta: Messenger strony + Instagram Business przez OAuth naszej aplikacji ──
+      case "meta.status": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const pending = await metaPending(pid);
+        return J({
+          configured: !!(META_APP_ID && META_APP_SECRET),
+          app_id: META_APP_ID,
+          pages: await metaPagesConnected(pid),
+          pending: pending ? pending.pages.map((p) => ({ id: p.id, name: p.name, ig: p.ig ?? null })) : [],
+        });
+      }
+      case "meta.oauth.url": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        if (!META_APP_ID || !META_APP_SECRET) return J({ error: "Aplikacja Meta nie jest skonfigurowana (META_APP_ID / META_APP_SECRET)" }, 400);
+        const redirect = metaRedirect(String(body.origin ?? ""));
+        const u = new URL("https://www.facebook.com/v23.0/dialog/oauth");
+        u.searchParams.set("client_id", META_APP_ID);
+        u.searchParams.set("redirect_uri", redirect);
+        u.searchParams.set("state", await metaState(pid));
+        u.searchParams.set("response_type", "code");
+        // Facebook Login for Business: zestaw uprawnień i zasobów siedzi w konfiguracji aplikacji
+        if (META_LOGIN_CONFIG_ID) {
+          u.searchParams.set("config_id", META_LOGIN_CONFIG_ID);
+          u.searchParams.set("override_default_response_type", "true");
+        } else u.searchParams.set("scope", META_SCOPES);
+        return J({ url: u.toString(), redirect_uri: redirect });
+      }
+      // kod z powrotu → token użytkownika (długi) → lista stron z tokenami → do wyboru w panelu
+      case "meta.oauth.exchange": {
+        const pid = await metaStateProject(String(body.state ?? ""));
+        if (!pid) return J({ error: "Nieprawidłowy albo przeterminowany stan logowania — spróbuj ponownie" }, 400);
+        await assertProject(user, pid);
+        const code = String(body.code ?? "");
+        if (!code) return J({ error: "Brak kodu z Facebooka" }, 400);
+        const redirect = metaRedirect(String(body.origin ?? ""));
+        try {
+          const tok = await graph("/oauth/access_token", { client_id: META_APP_ID, client_secret: META_APP_SECRET, redirect_uri: redirect, code });
+          const longTok = await graph("/oauth/access_token", {
+            grant_type: "fb_exchange_token", client_id: META_APP_ID, client_secret: META_APP_SECRET, fb_exchange_token: String(tok.access_token ?? ""),
+          }).catch(() => tok);
+          const userToken = String(longTok.access_token ?? tok.access_token ?? "");
+          const me = await graph("/me", { fields: "id,name", access_token: userToken });
+          const acc = await graph("/me/accounts", {
+            fields: "id,name,access_token,tasks,instagram_business_account{id,username}", limit: "100", access_token: userToken,
+          });
+          const pages: MetaPage[] = ((acc.data ?? []) as Array<Record<string, unknown>>).map((p) => ({
+            id: String(p.id), name: String(p.name ?? ""), access_token: String(p.access_token ?? ""), tasks: (p.tasks as string[]) ?? [],
+            ig: p.instagram_business_account ? { id: String((p.instagram_business_account as Record<string, unknown>).id), username: String((p.instagram_business_account as Record<string, unknown>).username ?? "") } : null,
+          }));
+          // tokeny stron zostają po stronie serwera; panel dostaje tylko nazwy
+          await db.from("fiq_project_integrations").upsert({
+            project_id: pid, kind: "meta_oauth", updated_at: new Date().toISOString(),
+            config: { pages, at: new Date().toISOString(), user_id: String(me.id ?? ""), user_name: String(me.name ?? "") },
+          });
+          return J({ ok: true, project_id: pid, user: String(me.name ?? ""), pages: pages.map((p) => ({ id: p.id, name: p.name, ig: p.ig ?? null, can: (p.tasks ?? []).includes("MODERATE") || (p.tasks ?? []).includes("MANAGE") })) });
+        } catch (e) {
+          const msg = String((e as Error).message ?? e);
+          console.error("meta exchange", msg.slice(0, 300));
+          return J({ error: msg.slice(0, 240) }, 400);
+        }
+      }
+      // wybrana strona → kanał facebook (+ instagram, jeśli strona ma konto IG) + subskrypcja webhooka
+      case "meta.connect": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        const pending = await metaPending(pid);
+        const page = pending?.pages.find((p) => p.id === String(body.page_id ?? ""));
+        if (!page) return J({ error: "Najpierw zaloguj się przez Facebooka i wybierz stronę" }, 400);
+        const withIg = body.with_instagram !== false && !!page.ig;
+        try {
+          await graph(`/${page.id}/subscribed_apps`, { subscribed_fields: "messages,messaging_postbacks", access_token: page.access_token }, { method: "POST" });
+        } catch (e) {
+          return J({ error: `Nie udało się zasubskrybować webhooka strony: ${String((e as Error).message ?? e).slice(0, 200)}` }, 400);
+        }
+        const now = new Date().toISOString();
+        const base = { page_id: page.id, page_token: page.access_token, page_name: page.name, oauth: true, connected_at: now, connected_by: pending?.user_name ?? "" };
+        const upsertChannel = async (type: string, name: string, cfg: Record<string, unknown>, matchField: string, matchVal: string) => {
+          const { data: ex } = await db.from("brain_channels").select("id, config").eq("project_id", pid).eq("type", type).contains("config", { [matchField]: matchVal }).limit(1);
+          if (ex?.length) {
+            await db.from("brain_channels").update({ name, enabled: true, config: { ...(ex[0].config as Record<string, unknown>), ...cfg } }).eq("id", ex[0].id);
+            return ex[0].id as string;
+          }
+          const { data: ins, error } = await db.from("brain_channels").insert({ project_id: pid, type, name, enabled: true, config: cfg }).select("id").single();
+          if (error) throw error;
+          return ins.id as string;
+        };
+        const fbId = await upsertChannel("facebook", `Messenger · ${page.name}`, base, "page_id", page.id);
+        let igId: string | null = null;
+        if (withIg && page.ig) {
+          igId = await upsertChannel("instagram", `Instagram · @${page.ig.username || page.ig.id}`, { ...base, ig_id: page.ig.id, ig_username: page.ig.username }, "ig_id", page.ig.id);
+        }
+        // strona wybrana — reszta listy nie jest już potrzebna (tokeny nie leżą dłużej niż trzeba)
+        await db.from("fiq_project_integrations").delete().eq("project_id", pid).eq("kind", "meta_oauth");
+        return J({ ok: true, facebook: fbId, instagram: igId, pages: await metaPagesConnected(pid) });
+      }
+      case "meta.disconnect": {
+        const id = String(body.id ?? "");
+        const { data: ch } = await db.from("brain_channels").select("id, project_id, type, config").eq("id", id).maybeSingle();
+        if (!ch) return J({ error: "not found" }, 404);
+        await assertProject(user, ch.project_id);
+        const cfg = (ch.config ?? {}) as Record<string, string>;
+        // odsubskrybowujemy stronę tylko, gdy to ostatni nasz kanał tej strony (IG i Messenger dzielą page_id)
+        const { data: siblings } = await db.from("brain_channels").select("id").eq("project_id", ch.project_id).contains("config", { page_id: cfg.page_id ?? "" }).neq("id", id);
+        if (!siblings?.length && cfg.page_id && cfg.page_token) {
+          await graph(`/${cfg.page_id}/subscribed_apps`, { access_token: cfg.page_token }, { method: "DELETE" }).catch((e) => console.error("meta unsubscribe", String(e).slice(0, 160)));
+        }
+        await db.from("brain_channels").delete().eq("id", id);
+        return J({ ok: true, pages: await metaPagesConnected(ch.project_id) });
+      }
+      case "meta.pending.clear": {
+        const pid = String(body.project_id || "");
+        await assertProject(user, pid);
+        await db.from("fiq_project_integrations").delete().eq("project_id", pid).eq("kind", "meta_oauth");
+        return J({ ok: true });
+      }
+
       // Rejestracja webhooków Unipile (idempotentna) + ich lista — do sprawdzenia w panelu admina.
       case "unipile.webhooks": {
         if (!admin) return J({ error: "forbidden" }, 403);

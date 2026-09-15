@@ -152,6 +152,7 @@ const READ_ACTIONS = new Set([
   'proj.products',
   'accounts.list',
   'connect.get',
+  'meta.status',
   // AI Łowca Leadów (hand-api ma własny klient, ale współdzieli reguły cache)
   'hand.config',
   'hand.leads',

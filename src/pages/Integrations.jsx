@@ -18,6 +18,7 @@ import {
 import { SkelPage } from '../shared/Skeleton.jsx'
 import SalesChannels from '../components/SalesChannels.jsx'
 import ChannelsConnect from '../shared/ChannelsConnect.jsx'
+import MetaConnect from '../components/MetaConnect.jsx'
 
 export default function IntegrationsPage() {
   const proj = session.proj
@@ -63,6 +64,9 @@ export default function IntegrationsPage() {
           <div className="mono" style={{ opacity: 0.62, margin: '2px 0 14px' }}>
             {both ? '01 — AI Doradca' : 'AI Doradca'}
           </div>
+          {/* strona firmowa na Facebooku (Messenger) + Instagram Business — OAuth naszej aplikacji Meta */}
+          <MetaConnect projId={proj.id} projectId={proj.id} onChange={() => refreshChannels()} />
+          <div className="spacer" />
           <Integrations projId={proj.id} channels={channels} refreshChannels={refreshChannels} />
         </>
       )}
