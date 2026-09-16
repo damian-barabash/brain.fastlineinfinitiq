@@ -50,25 +50,30 @@ export default function Shell() {
   // może wpuścić do Brain kogoś, komu produkt odebrano.
   useEffect(() => {
     let alive = true
-    ensureProductAccess(PRODUCTS)
-      .then(({ ok, product: cur }) => {
-        if (!alive) return
-        if (!ok) {
-          session.setProj(null)
-          nav('/', { replace: true })
-          return
-        }
-        if (cur) setProduct(cur)
-      })
-      .catch(() => {})
+    // chwilę później: dane otwartej strony mają wyjść do bramki pierwsze
+    const t = setTimeout(() => {
+      ensureProductAccess(PRODUCTS)
+        .then(({ ok, product: cur }) => {
+          if (!alive) return
+          if (!ok) {
+            session.setProj(null)
+            nav('/', { replace: true })
+            return
+          }
+          if (cur) setProduct(cur)
+        })
+        .catch(() => {})
+    }, 1200)
     return () => {
       alive = false
+      clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // prefetch: chunki stron + dane wszystkich sekcji — nawigacja bez czekania
   useEffect(() => {
+    let alive = true
     const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300))
     idle(() => {
       import('../pages/Dashboard.jsx')
@@ -78,15 +83,27 @@ export default function Shell() {
       import('../pages/Settings.jsx')
       import('../pages/Integrations.jsx')
       if (user?.role === 'admin') import('../pages/AdminPanel.jsx')
-      warm('stats', { project_id: proj.id, days: 30, channel_type: undefined })
-      warm('kb.list', { project_id: proj.id })
-      warm('channels.list', { project_id: proj.id })
-      if (isAdvisor) warm('advisor.get', { project_id: proj.id })
-      if (isSales) {
-        warm('sales.get', { project_id: proj.id })
-        warm('leads.list', { project_id: proj.id })
-      }
     })
+    // Dane sekcji podgrzewamy PO KOLEI i z opóźnieniem: równoległa salwa żądań
+    // na wolnym łączu (albo przy spowolnionej bramce) opóźniała dane strony,
+    // którą użytkownik właśnie otworzył. Kolejność = najczęściej odwiedzane.
+    const jobs = [
+      ['stats', { project_id: proj.id, days: 30, channel_type: undefined }],
+      ['kb.list', { project_id: proj.id }],
+      ['channels.list', { project_id: proj.id }],
+    ]
+    if (isAdvisor) jobs.push(['advisor.get', { project_id: proj.id }])
+    if (isSales) jobs.push(['sales.get', { project_id: proj.id }], ['leads.list', { project_id: proj.id }])
+    const t = setTimeout(async () => {
+      for (const [a, p] of jobs) {
+        if (!alive) return
+        await warm(a, p)
+      }
+    }, 2500)
+    return () => {
+      alive = false
+      clearTimeout(t)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [proj.id, product.key])
 

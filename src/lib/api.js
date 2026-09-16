@@ -15,18 +15,14 @@ export {
   getTheme,
   setTheme,
 } from '../shared/platform.js'
-import { FN_BASE, session } from '../shared/platform.js'
+import { FN_BASE, session, invalidateCache, postEdge } from '../shared/platform.js'
 
 export const PANEL_ORIGIN = 'https://brain.fastlineinfinitiq.pl'
 
 // Akcje sprzedawcy wykonywane bezpośrednio na brain-sales (autoryzacja hook_key z sales.get):
 // preview / send / test — długie (generacja AI, wysyłka), nie przechodzą przez brain-admin.
 export async function salesApi(hookKey, action, payload = {}) {
-  const r = await fetch(`${FN_BASE}/brain-sales`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, key: hookKey, ...payload }),
-  })
+  const r = await postEdge('brain-sales', { action, key: hookKey, ...payload })
   const data = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
   if (action === 'send') invalidateCache()
@@ -40,7 +36,7 @@ export function salesChatStream(body, { onDelta, onDone, onError }) {
     try {
       const r = await fetch(`${FN_BASE}/brain-sales`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, // bez preflightu (patrz postEdge)
         body: JSON.stringify({ action: 'chat', ...body }),
         signal: ctrl.signal,
       })
@@ -78,11 +74,7 @@ export function salesChatStream(body, { onDelta, onDone, onError }) {
 }
 
 export async function salesHello(key) {
-  const r = await fetch(`${FN_BASE}/brain-sales`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'hello', key }),
-  })
+  const r = await postEdge('brain-sales', { action: 'hello', key }, { read: true })
   if (!r.ok) throw new Error('invalid key')
   return r.json()
 }
@@ -94,7 +86,7 @@ export function chatStreamRaw(body, { onDelta, onDone, onError }) {
     try {
       const r = await fetch(`${FN_BASE}/brain-chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, // bez preflightu (patrz postEdge)
         body: JSON.stringify(body),
         signal: ctrl.signal,
       })
@@ -137,22 +129,14 @@ export function chatStream({ key, message, conversationId, visitorId }, handlers
 
 // akcje JSON czatu: rate / feedback.decide / end
 export async function chatAction(key, payload) {
-  const r = await fetch(`${FN_BASE}/brain-chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, ...payload }),
-  })
+  const r = await postEdge('brain-chat', { key, ...payload })
   const data = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`)
   return data
 }
 
 export async function chatHello(key) {
-  const r = await fetch(`${FN_BASE}/brain-chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, action: 'hello' }),
-  })
+  const r = await postEdge('brain-chat', { key, action: 'hello' }, { read: true })
   if (!r.ok) throw new Error('invalid key')
   return r.json()
 }

@@ -4,7 +4,7 @@
 // ich domenie, a do nas wraca tylko potwierdzenie (webhook), które przypisuje konto
 // do projektu. Strona jest poza bramką logowania: wszystko autoryzuje token z adresu.
 import { useCallback, useEffect, useState } from 'react'
-import { FN_BASE } from './platform.js'
+import { postEdge } from './platform.js'
 import { IcCheck, IcShield, IcGlobe, IcLink, IcWhatsApp, IcInstagram, IcLinkedIn, IcFacebook, IcTelegram } from './Icons.jsx'
 
 const ICON = { WHATSAPP: IcWhatsApp, INSTAGRAM: IcInstagram, LINKEDIN: IcLinkedIn, MESSENGER: IcFacebook, TELEGRAM: IcTelegram }
@@ -17,12 +17,12 @@ const HOW = {
 }
 
 async function call(action, t) {
-  const r = await fetch(`${FN_BASE}/brain-admin`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, t }),
-  })
-  return await r.json().catch(() => ({ ok: false }))
+  try {
+    const r = await postEdge('brain-admin', { action, t }, { read: action === 'connect.info' })
+    return await r.json().catch(() => ({ ok: false }))
+  } catch {
+    return { ok: false }
+  }
 }
 
 const BAD = {

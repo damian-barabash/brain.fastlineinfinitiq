@@ -162,12 +162,36 @@ const READ_ACTIONS = new Set([
   'hand.runs',
 ])
 
+// Odczyty są idempotentne, więc dostają limit czasu i jeden powtórny strzał —
+// na słabym łączu zawieszone żądanie potrafiło wisieć minutami bez odpowiedzi.
+// Mutacji NIE powtarzamy (wpis mógłby powstać dwa razy) i nie ograniczamy w czasie
+// (wysyłka pliku do bazy wiedzy na wolnym łączu może trwać dłużej niż każdy limit).
+const READ_TIMEOUT_MS = 30_000
+
+// Wspólny transport dla funkcji edge platformy (brain-admin, hand-api, …).
+// Body idzie jako text/plain: to „proste żądanie” CORS, więc przeglądarka NIE wysyła
+// osobnego OPTIONS przed każdym wywołaniem — dwa razy mniej podróży do bramki
+// (przy jej spowolnieniu każda kosztuje sekundy). Funkcje czytają body przez
+// req.json(), które nie patrzy na Content-Type — sprawdzone na każdej z nich.
+export async function postEdge(fn, body, { read = false } = {}) {
+  const payload = JSON.stringify(body)
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(`${FN_BASE}/${fn}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: payload,
+        signal: read && typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(READ_TIMEOUT_MS) : undefined,
+      })
+    } catch (e) {
+      if (read && attempt === 0) continue
+      throw new Error(e?.name === 'TimeoutError' ? 'Serwer nie odpowiada — spróbuj ponownie' : 'Brak połączenia z serwerem')
+    }
+  }
+}
+
 export async function api(action, payload = {}) {
-  const r = await fetch(`${FN_BASE}/brain-admin`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, token: session.token, ...payload }),
-  })
+  const r = await postEdge('brain-admin', { action, token: session.token, ...payload }, { read: READ_ACTIONS.has(action) })
   const data = await r.json().catch(() => ({}))
   if (r.status === 401 && action !== 'login') {
     session.clear()

@@ -37,9 +37,11 @@ export function useCached(action, payload, fetcher) {
 }
 
 // Podgrzanie cache w tle (po wyborze projektu) — nawigacja jest potem natychmiastowa.
+// Zwraca obietnicę, żeby dało się podgrzewać PO KOLEI (Shell) — równoległa salwa
+// żądań na słabym łączu konkurowała z danymi strony, którą użytkownik właśnie otworzył.
 export function warm(action, payload, fetcher) {
   const key = action + '|' + JSON.stringify(payload ?? {})
-  ;(fetcher || api)(action, payload)
+  return (fetcher || api)(action, payload)
     .then((d) => cacheWrite(key, d))
     .catch(() => {})
 }

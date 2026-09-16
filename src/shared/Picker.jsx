@@ -1,8 +1,8 @@
 // Wspólny wybór: PRODUKT → workspace → projekt. Ten sam ekran w każdym produkcie.
 // Gdy klient wybierze produkt z innej domeny — przenosimy go tam z sesją (#sso).
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { api, session, gotoProduct, takePendingProduct } from './platform.js'
+import { api, session, gotoProduct, takePendingProduct, cacheRead, cacheWrite } from './platform.js'
 import { IcFolder, IcBox, IcPlus, IcLogout, IcArrowR, IcBrain, IcHand, IcSpark } from './Icons.jsx'
 import { SkelList } from './Skeleton.jsx'
 
@@ -27,30 +27,53 @@ export default function Picker({ productKey, localKeys, onDone }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
+  // Listy renderują się NAJPIERW z cache (localStorage, ten sam klucz co useCached),
+  // a świeże dane dociągają się w tle. Wejście w wybór z panelu (PD/WS/PR) jest przez
+  // to natychmiastowe nawet przy wolnej bramce; mutacje (ws.create, proj.create, …)
+  // czyszczą cache w api(), więc lista nie zostaje stara po dodaniu czegoś.
+  const alive = useRef(true)
+  const wsRef = useRef(null)
   useEffect(() => {
-    let alive = true
+    alive.current = true // StrictMode w dev odmontowuje i montuje efekt ponownie
+    return () => { alive.current = false }
+  }, [])
+
+  async function swr(action, payload, apply) {
+    const key = action + '|' + JSON.stringify(payload ?? {})
+    const cached = cacheRead(key)
+    if (cached) apply(cached)
+    try {
+      const d = await api(action, payload)
+      cacheWrite(key, d)
+      if (alive.current) apply(d)
+    } catch (e) {
+      // z cache jest co pokazać — sieć dogoni później; bez cache pokazujemy błąd
+      if (!cached && alive.current) setErr(e.message)
+    }
+  }
+
+  useEffect(() => {
     // produkt wybrany jeszcze w poprzedniej domenie (przejście przez #sso)
     const pending = takePendingProduct()
-    api('products.mine')
-      .then((d) => {
-        if (!alive) return
-        const list = d.products ?? []
-        setProducts(list)
-        // klient już wybrał ten produkt (albo ma tylko ten jeden) — nie pytamy drugi raz
-        // produkt tej aplikacji: ten już wybrany, a jak nie ma — pierwszy pasujący
-        const here = list.find((p) => p.key === session.product?.key && isLocal(p.key))
-          || list.find((p) => isLocal(p.key))
-        if (wanted === 'product') return // wprost poproszono o wybór produktu
-        const auto =
-          (wanted && here) || // wejście z panelu: produkt jest już wybrany
-          (pending && list.find((p) => p.key === pending && isLocal(p.key))) ||
-          (list.length === 1 && isLocal(list[0].key) ? list[0] : null)
-        if (auto) pickProduct(auto === true ? here : auto, true)
-      })
-      .catch((e) => setErr(e.message))
-    return () => {
-      alive = false
-    }
+    let advanced = false
+    swr('products.mine', {}, (d) => {
+      const list = d.products ?? []
+      setProducts(list)
+      if (advanced) return // krok już rozstrzygnięty z cache — sieć tylko odświeża listę
+      // klient już wybrał ten produkt (albo ma tylko ten jeden) — nie pytamy drugi raz
+      // produkt tej aplikacji: ten już wybrany, a jak nie ma — pierwszy pasujący
+      const here = list.find((p) => p.key === session.product?.key && isLocal(p.key))
+        || list.find((p) => isLocal(p.key))
+      if (wanted === 'product') return // wprost poproszono o wybór produktu
+      const auto =
+        (wanted && here) || // wejście z panelu: produkt jest już wybrany
+        (pending && list.find((p) => p.key === pending && isLocal(p.key))) ||
+        (list.length === 1 && isLocal(list[0].key) ? list[0] : null)
+      if (auto) {
+        advanced = true
+        pickProduct(auto === true ? here : auto, true)
+      }
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -62,34 +85,40 @@ export default function Picker({ productKey, localKeys, onDone }) {
     }
     session.setProduct(p)
     setStage('ws')
+    wsRef.current = null
     if (!silent) setNewName('')
-    try {
-      const d = await api('ws.list')
+    let advanced = false
+    await swr('ws.list', {}, (d) => {
       const list = d.workspaces ?? []
       setWorkspaces(list)
+      if (advanced || wsRef.current) return // krok już rozstrzygnięty (albo użytkownik sam kliknął)
       // prośba o wybór projektu: workspace jest już znany, przeskakujemy krok
       if (wanted === 'proj' && session.ws) {
         const cur = list.find((w) => w.id === session.ws.id)
-        if (cur) return pickWs(cur)
+        if (cur) {
+          advanced = true
+          pickWs(cur)
+          return
+        }
       }
-      if (user?.role !== 'admin' && list.length === 1) pickWs(list[0])
-    } catch (e) {
-      setErr(e.message)
-    }
+      if (user?.role !== 'admin' && list.length === 1) {
+        advanced = true
+        pickWs(list[0])
+      }
+    })
   }
 
   async function pickWs(w) {
     setWs(w)
+    wsRef.current = w.id
     setProjects(null)
     setStage('proj')
-    try {
-      // Projekty bywają przypisane do konkretnych produktów — pokazujemy te,
-      // które należą do wybranego (projekt bez przypisań należy do wszystkich).
-      const d = await api('proj.list', { workspace_id: w.id, product_key: session.product?.key })
+    // Projekty bywają przypisane do konkretnych produktów — pokazujemy te,
+    // które należą do wybranego (projekt bez przypisań należy do wszystkich).
+    await swr('proj.list', { workspace_id: w.id, product_key: session.product?.key }, (d) => {
+      if (wsRef.current !== w.id) return // w międzyczasie wybrano inny workspace
       setProjects(d.projects ?? [])
-    } catch (e) {
-      setErr(e.message)
-    }
+    })
   }
 
   async function createWs() {
@@ -256,7 +285,7 @@ export default function Picker({ productKey, localKeys, onDone }) {
               </div>
             )}
             <div className="spacer" />
-            <button className="btn sm" onClick={() => { setWs(null); setStage('ws') }}>← Inny workspace</button>
+            <button className="btn sm" onClick={() => { setWs(null); wsRef.current = null; setStage('ws') }}>← Inny workspace</button>
           </>
         )}
       </div>
