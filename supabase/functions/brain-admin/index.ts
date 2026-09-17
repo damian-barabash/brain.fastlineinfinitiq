@@ -1684,7 +1684,9 @@ Deno.serve(async (req) => {
           .select("id, channel_type, status, started_at, last_at, visitor_id") // visitor_id: kolumna „Gość" w panelu była zawsze pusta bez niego
           .eq("project_id", pid)
           .gte("started_at", since);
-        if (chFilter) cq = cq.eq("channel_type", chFilter);
+        // „Messenger" w panelu = strona przez aplikację Meta (`facebook`) + skrzynka przez Unipile (`messenger`)
+        if (chFilter === "messenger") cq = cq.in("channel_type", ["messenger", "facebook"]);
+        else if (chFilter) cq = cq.eq("channel_type", chFilter);
         const { data: convs } = await cq.limit(5000);
         const convIds = (convs ?? []).map((c) => c.id);
 

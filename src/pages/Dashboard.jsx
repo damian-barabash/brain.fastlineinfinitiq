@@ -22,12 +22,15 @@ import {
 import { SkelStats, SkelChart, SkelText } from '../shared/Skeleton.jsx'
 
 const SAVED_MIN_PER_REPLY = 2 // minuty pracy człowieka na jedną odpowiedź
+// Strona firmowa przez aplikację Meta zapisuje `channel_type = 'facebook'`, a skrzynka przez Unipile
+// `'messenger'` — dla klienta to jeden kanał „Messenger", więc w panelu oba idą pod jedną etykietą.
+const chKey = (t) => (t === 'facebook' ? 'messenger' : t || '')
+const chLabel = (t) => { const k = chKey(t); return k === 'widget' ? 'Widget WWW' : k ? k[0].toUpperCase() + k.slice(1) : '—' }
 const CHANNELS = [
   { key: '', label: 'Wszystkie' },
   { key: 'widget', label: 'Widget' },
   { key: 'whatsapp', label: 'WhatsApp' },
   { key: 'instagram', label: 'Instagram' },
-  { key: 'facebook', label: 'Facebook' },
   { key: 'linkedin', label: 'LinkedIn' },
   { key: 'messenger', label: 'Messenger' },
   { key: 'telegram', label: 'Telegram' },
@@ -85,7 +88,7 @@ export default function Dashboard() {
     const byStatus = { open: 0, closed: 0, redirected: 0 }
     for (const c of convs) byStatus[c.status] = (byStatus[c.status] || 0) + 1
     const byChannel = {}
-    for (const c of convs) byChannel[c.channel_type] = (byChannel[c.channel_type] || 0) + 1
+    for (const c of convs) byChannel[chKey(c.channel_type)] = (byChannel[chKey(c.channel_type)] || 0) + 1
 
     // godziny szczytu
     const byHour = Array(24).fill(0)
@@ -234,7 +237,7 @@ function Overview({ S }) {
           <h3>Kanały</h3>
           <Bars
             items={Object.entries(S.byChannel).map(([k, v]) => ({
-              label: k === 'widget' ? 'Widget WWW' : k[0].toUpperCase() + k.slice(1),
+              label: chLabel(k),
               value: v,
             }))}
           />
@@ -423,7 +426,7 @@ function Conversations({ S, refetch }) {
                   <input type="checkbox" checked={checked.has(c.id)} onChange={() => toggle(c.id)} aria-label="Zaznacz rozmowę" />
                 </td>
                 <td>{new Date(c.started_at).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })}</td>
-                <td className="mono" style={{ fontSize: 10.5 }}>{c.channel_type}</td>
+                <td className="mono" style={{ fontSize: 10.5 }}>{chLabel(c.channel_type)}</td>
                 <td className="mono" style={{ fontSize: 10.5 }}>{c.visitor_id?.slice(0, 14) || '—'}</td>
                 <td>{badge(c.status)}</td>
                 <td onClick={(e) => e.stopPropagation()}>
