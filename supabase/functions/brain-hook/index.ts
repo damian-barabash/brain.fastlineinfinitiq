@@ -182,6 +182,47 @@ async function sendWhatsApp(ch: ChannelRow, phoneNumberId: string, to: string, t
 }
 
 // ── obsługa payloadów ─────────────────────────────────────────────────────
+// ── „żywy" czat: przeczytane + pisze… ──────────────────────────────────────
+// Ludzie są przyzwyczajeni, że po wysłaniu wiadomości widzą „wyświetlono", a potem trzy kropki.
+// Bez tego agent wygląda jak automat, który milczy i nagle wyrzuca gotowy tekst.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// ile „pisać" po wygenerowaniu odpowiedzi: proporcjonalnie do długości, ale bez przesady
+const typingMs = (text: string) => Math.min(3200, Math.max(700, text.length * 16));
+
+// Messenger / Instagram (aplikacja Meta): mark_seen | typing_on | typing_off
+async function metaSenderAction(ch: ChannelRow, recipientId: string, action: "mark_seen" | "typing_on" | "typing_off") {
+  const pageToken = ch.config.page_token ?? "";
+  if (!pageToken) return;
+  try {
+    const r = await fetch(`${GRAPH}/me/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${pageToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ recipient: { id: recipientId }, sender_action: action }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!r.ok) console.error("sender_action", action, r.status, (await r.text().catch(() => "")).slice(0, 160));
+  } catch (e) {
+    console.error("sender_action network", action, String(e).slice(0, 120)); // kosmetyka — nigdy nie blokuje odpowiedzi
+  }
+}
+
+// WhatsApp Cloud API: jedno wywołanie oznacza wiadomość jako przeczytaną i włącza „pisze…" (do 25 s albo do wysyłki)
+async function waReadAndTyping(ch: ChannelRow, phoneNumberId: string, messageId: string) {
+  const token = ch.config.wa_token ?? "";
+  if (!token || !messageId) return;
+  try {
+    const r = await fetch(`${GRAPH}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: messageId, typing_indicator: { type: "text" } }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!r.ok) console.error("wa read/typing", r.status, (await r.text().catch(() => "")).slice(0, 160));
+  } catch (e) {
+    console.error("wa read/typing network", String(e).slice(0, 120));
+  }
+}
+
 async function handleMessengerLike(bodyObj: Record<string, unknown>, kind: "facebook" | "instagram", raw: string, sig: string | null) {
   const entries = (bodyObj.entry ?? []) as Record<string, unknown>[];
   for (const entry of entries) {
@@ -204,15 +245,24 @@ async function handleMessengerLike(bodyObj: Record<string, unknown>, kind: "face
         continue;
       }
       if (await seenBefore(ch.project_id, String(msg.mid ?? ""))) continue;
+      await metaSenderAction(ch, senderId, "mark_seen"); // klient widzi „wyświetlono"
       const text = String(msg.text ?? "").trim();
       if (!text) {
         // zdjęcie/naklejka/głosówka — bez tego bot po prostu milczy i wygląda na zepsutego
         await sendMessenger(ch, senderId, NO_TEXT_REPLY);
         continue;
       }
+      await sleep(500 + Math.random() * 700); // chwila „czytania"
+      await metaSenderAction(ch, senderId, "typing_on"); // trzy kropki na czas generowania
       const reply = await askBrain(ch.public_key, text, `${kind}:${senderId}`);
-      if (reply) await sendMessenger(ch, senderId, reply);
-      else await logEvent(ch.project_id, "no_reply", { kind, reason: "brain-chat zwrócił pusto" });
+      if (reply) {
+        await metaSenderAction(ch, senderId, "typing_on"); // wskaźnik gaśnie po 20 s — odnawiamy przed „dopisywaniem"
+        await sleep(typingMs(reply));
+        await sendMessenger(ch, senderId, reply); // wysłanie wiadomości samo gasi kropki
+      } else {
+        await metaSenderAction(ch, senderId, "typing_off");
+        await logEvent(ch.project_id, "no_reply", { kind, reason: "brain-chat zwrócił pusto" });
+      }
     }
   }
 }
@@ -301,6 +351,7 @@ async function handleWhatsApp(bodyObj: Record<string, unknown>, raw: string, sig
         const from = String(m.from ?? "");
         if (!from) continue;
         if (await seenBefore(ch.project_id, String(m.id ?? ""))) continue;
+        await waReadAndTyping(ch, phoneNumberId, String(m.id ?? "")); // niebieskie ptaszki + „pisze…"
         if (m.type !== "text") {
           await sendWhatsApp(ch, phoneNumberId, from, NO_TEXT_REPLY);
           continue;
@@ -308,8 +359,10 @@ async function handleWhatsApp(bodyObj: Record<string, unknown>, raw: string, sig
         const text = String((m.text as Record<string, unknown>)?.body ?? "").trim();
         if (!text) continue;
         const reply = await askBrain(ch.public_key, text, `wa:${from}`);
-        if (reply) await sendWhatsApp(ch, phoneNumberId, from, reply);
-        else await logEvent(ch.project_id, "no_reply", { kind: "whatsapp", reason: "brain-chat zwrócił pusto" });
+        if (reply) {
+          await sleep(typingMs(reply));
+          await sendWhatsApp(ch, phoneNumberId, from, reply);
+        } else await logEvent(ch.project_id, "no_reply", { kind: "whatsapp", reason: "brain-chat zwrócił pusto" });
       }
     }
   }
@@ -379,6 +432,17 @@ async function uniSend(chatId: string, accountId: string, provider: string, text
   // WhatsApp: „pisze…" przez chwilę zależną od długości — wygląda jak człowiek
   if (provider === "WHATSAPP") fd.set("typing_duration", String(Math.min(5000, Math.max(1200, text.length * 35))));
   return await uniFetch(`/chats/${encodeURIComponent(chatId)}/messages`, { method: "POST", body: fd }, 30_000);
+}
+
+// Unipile: „przeczytane" działa na WhatsAppie i LinkedInie (setReadStatus); Instagram/Telegram API tego nie daje —
+// błąd jest tam po prostu ignorowany. „Pisze…" na WhatsAppie robi `typing_duration` przy wysyłce (uniSend).
+async function uniMarkRead(chatId: string, provider: string) {
+  if (!["WHATSAPP", "LINKEDIN", "INSTAGRAM", "TELEGRAM", "MESSENGER"].includes(provider)) return;
+  try {
+    await uniFetch(`/chats/${encodeURIComponent(chatId)}`, { method: "PATCH", body: JSON.stringify({ action: "setReadStatus", value: true }) }, 8_000);
+  } catch (e) {
+    if (provider === "WHATSAPP" || provider === "LINKEDIN") console.error("unipile setReadStatus", provider, String(e).slice(0, 160));
+  }
 }
 
 const digits = (s: string) => String(s ?? "").replace(/[^\d]/g, "");
@@ -604,6 +668,7 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
     attachments: hasAttachments, muted: !!muteUntil,
   };
   if (lead) {
+    if (!muteUntil) await uniMarkRead(chatId, provider); // w ciszy (człowiek przejął rozmowę) nie czytamy za niego
     await forwardSales(salesPayload); // przy ciszy sprzedawca tylko zapisze wiadomość (bez odpowiedzi)
     return;
   }
@@ -623,6 +688,7 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
       return;
     }
     if (!(await uniBudgetOk(acc, chatId))) return;
+    await uniMarkRead(chatId, provider); // klient od razu widzi „przeczytane"
     const reply = await askBrain(ch.public_key, text, `${channel}:${senderId}`, channel);
     if (reply) await replyUni(acc, chatId, reply, true);
     else await logEvent(acc.project_id, "no_reply", { kind: "unipile", provider, reason: "brain-chat zwrócił pusto" });
@@ -631,7 +697,10 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
   // 4) doradca wyłączony → Sprzedawca może przyjąć nowego (decyduje jego konfiguracja).
   //    LinkedIn wyjątkowo NIE: to prywatna skrzynka właściciela — odpowiadamy tam tylko
   //    leadom Łowcy/Sprzedawcy albo gdy właściciel świadomie włączył doradcę na tym koncie.
-  if (text && provider !== "LINKEDIN") await forwardSales(salesPayload);
+  if (text && provider !== "LINKEDIN") {
+    await uniMarkRead(chatId, provider);
+    await forwardSales(salesPayload);
+  }
   else await logEvent(acc.project_id, "uni_no_route", { provider, chat_id: chatId, reason: provider === "LINKEDIN" ? "linkedin bez doradcy" : "bez tekstu" });
 }
 
@@ -726,13 +795,15 @@ Deno.serve(async (req) => {
     const key = req.headers.get("x-poll-key") ?? url.searchParams.get("key") ?? "";
     if (!META_POLL_KEY || key !== META_POLL_KEY) return new Response("forbidden", { status: 403 });
     const work = (async () => {
-      for (let i = 0; i < 3; i++) {
+      // 5 przebiegów co ~11 s: „wyświetlono" i kropki pojawiają się najpóźniej po kilkunastu sekundach.
+      // Nakładanie się z następnym wywołaniem crona jest bezpieczne — wiadomości deduplikuje `seenBefore`.
+      for (let i = 0; i < 5; i++) {
         try {
           await pollMetaOnce();
         } catch (e) {
           console.error("meta poll run error", String(e).slice(0, 200));
         }
-        if (i < 2) await new Promise((r) => setTimeout(r, 18_000));
+        if (i < 4) await new Promise((r) => setTimeout(r, 11_000));
       }
     })();
     // @ts-ignore EdgeRuntime dostępny w środowisku Supabase

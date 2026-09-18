@@ -1215,6 +1215,15 @@ async function inboundWa(projectId: string, cfg: SalesCfg, payload: Record<strin
           console.error("wa: brak jednoznacznego leada dla numeru", fromPhone, "kandydatów:", cands.length);
           continue; // obcy numer albo kolizja — nie odpisujemy nie tej osobie
         }
+        // znany lead → „przeczytane" + „pisze…" (jedno wywołanie Cloud API); obcym numerom nie pokazujemy aktywności
+        if (cfg.whatsapp?.wa_token && cfg.whatsapp?.phone_number_id && msg.id) {
+          await fetch(`https://graph.facebook.com/v23.0/${cfg.whatsapp.phone_number_id}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${cfg.whatsapp.wa_token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: String(msg.id), typing_indicator: { type: "text" } }),
+            signal: AbortSignal.timeout(8_000),
+          }).catch((e) => console.error("wa read/typing", String(e).slice(0, 120)));
+        }
         results.push(await handleInbound(projectId, cfg, cands[0] as Lead, "whatsapp", { subject: "", text }));
       }
     }
