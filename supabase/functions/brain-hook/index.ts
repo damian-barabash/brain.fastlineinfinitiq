@@ -217,6 +217,67 @@ async function handleMessengerLike(bodyObj: Record<string, unknown>, kind: "face
   }
 }
 
+// ── Meta: zapasowy odczyt skrzynki strony (polling) ───────────────────────
+// Aplikacja Meta w trybie deweloperskim NIE dostaje żywych webhooków (tylko testowe z dashboardu),
+// a opublikować ją można dopiero po App Review. Żeby doradca odpowiadał już teraz (także recenzentowi
+// Meta), co ~20 s czytamy ostatnie rozmowy stron podłączonych przez OAuth i każdą nową wiadomość klienta
+// przepuszczamy przez TEN SAM handler co webhook. Id wiadomości z Conversations API to ten sam `m_…`
+// co `mid` w webhooku, więc po publikacji aplikacji oba źródła deduplikują się w `seenBefore`.
+const META_POLL_KEY = Deno.env.get("META_POLL_KEY") ?? "";
+const POLL_MAX_AGE_MS = 15 * 60_000; // starszych wiadomości nie ruszamy (pierwsze uruchomienie, przerwy)
+const fbTime = (t: unknown) => Date.parse(String(t ?? "").replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+
+async function signRaw(raw: string, secret: string): Promise<string | null> {
+  if (!secret) return null;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw));
+  return "sha256=" + [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function pollMetaOnce(): Promise<number> {
+  const { data: chans } = await db.from("brain_channels").select("project_id, config").eq("type", "facebook").eq("enabled", true);
+  let handled = 0;
+  for (const ch of chans ?? []) {
+    const cfg = (ch.config ?? {}) as Record<string, unknown>;
+    const pageId = String(cfg.page_id ?? "");
+    const token = String(cfg.page_token ?? "");
+    if (!cfg.oauth || !pageId || !token) continue;
+    try {
+      const ctrl = new AbortController();
+      const tm = setTimeout(() => ctrl.abort(), 15_000);
+      const r = await fetch(
+        `${GRAPH}/${pageId}/conversations?platform=messenger&limit=10&fields=id,updated_time,messages.limit(1){id,from,message,created_time}`,
+        { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal },
+      );
+      clearTimeout(tm);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        console.error("meta poll:", pageId, r.status, JSON.stringify(j).slice(0, 200));
+        continue;
+      }
+      for (const conv of (j.data ?? []) as Record<string, unknown>[]) {
+        if (Date.now() - fbTime(conv.updated_time) > POLL_MAX_AGE_MS) continue;
+        const m = (((conv.messages as Record<string, unknown>)?.data ?? []) as Record<string, unknown>[])[0];
+        const fromId = String((m?.from as Record<string, unknown>)?.id ?? "");
+        // ostatnie słowo należy do strony (bot albo człowiek ze skrzynki) → nic do zrobienia
+        if (!m || !fromId || fromId === pageId) continue;
+        if (Date.now() - fbTime(m.created_time) > POLL_MAX_AGE_MS) continue;
+        const body = {
+          object: "page",
+          entry: [{ id: pageId, time: Date.now(), messaging: [{ sender: { id: fromId }, recipient: { id: pageId }, timestamp: fbTime(m.created_time), message: { mid: String(m.id ?? ""), text: String(m.message ?? "") } }] }],
+        };
+        const raw = JSON.stringify(body);
+        const sig = await signRaw(raw, String(cfg.app_secret ?? "") || (Deno.env.get("META_APP_SECRET") ?? ""));
+        await handleMessengerLike(body, "facebook", raw, sig);
+        handled++;
+      }
+    } catch (e) {
+      console.error("meta poll error", pageId, String(e).slice(0, 200));
+    }
+  }
+  return handled;
+}
+
 async function handleWhatsApp(bodyObj: Record<string, unknown>, raw: string, sig: string | null) {
   const entries = (bodyObj.entry ?? []) as Record<string, unknown>[];
   for (const entry of entries) {
@@ -659,8 +720,28 @@ async function handleUnipileAuth(body: Record<string, unknown>) {
 Deno.serve(async (req) => {
   const url = new URL(req.url);
 
-  // ── Unipile (klucz w query, bo notify_url kreatora nie umie nagłówków) ──
   const hook = url.searchParams.get("hook") ?? "";
+  // ── Meta polling (pg_cron co minutę; w jednym wywołaniu trzy przebiegi co ~18 s) ──
+  if (hook === "meta-poll") {
+    const key = req.headers.get("x-poll-key") ?? url.searchParams.get("key") ?? "";
+    if (!META_POLL_KEY || key !== META_POLL_KEY) return new Response("forbidden", { status: 403 });
+    const work = (async () => {
+      for (let i = 0; i < 3; i++) {
+        try {
+          await pollMetaOnce();
+        } catch (e) {
+          console.error("meta poll run error", String(e).slice(0, 200));
+        }
+        if (i < 2) await new Promise((r) => setTimeout(r, 18_000));
+      }
+    })();
+    // @ts-ignore EdgeRuntime dostępny w środowisku Supabase
+    if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(work);
+    else await work;
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+
+  // ── Unipile (klucz w query, bo notify_url kreatora nie umie nagłówków) ──
   if (hook.startsWith("unipile")) {
     const key = url.searchParams.get("key") ?? req.headers.get("x-hook-key") ?? "";
     if (!UNI_HOOK_KEY || key !== UNI_HOOK_KEY) return new Response("forbidden", { status: 403 });
