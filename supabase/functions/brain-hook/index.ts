@@ -519,7 +519,14 @@ async function isOurOwnMessage(chatId: string, messageId: string, text: string):
   const since = new Date(Date.now() - 5 * 60_000).toISOString();
   const { data } = await db.from("brain_events").select("data").eq("type", "uni_sent").eq("data->>chat_id", chatId).gte("created_at", since).limit(20);
   const k = sentKey(text);
-  return !!k && (data ?? []).some((r) => String((r.data as Record<string, unknown>)?.t ?? "") === k);
+  if (!k) return false;
+  if ((data ?? []).some((r) => String((r.data as Record<string, unknown>)?.t ?? "") === k)) return true;
+  // notatka z zaproszenia LinkedIn (Łowca) trafia do czatu dopiero po przyjęciu zaproszenia — ślad bez chat_id,
+  // więc szukamy tej samej treści w ostatnich 30 dniach
+  const month = new Date(Date.now() - 30 * 86400_000).toISOString();
+  const { count } = await db.from("brain_events").select("id", { count: "exact", head: true })
+    .eq("type", "uni_sent").eq("data->>chat_id", "").eq("data->>t", k).gte("created_at", month);
+  return (count ?? 0) > 0;
 }
 
 async function uniMuteUntil(chatId: string): Promise<string | null> {
@@ -656,7 +663,8 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
   if (provider === "LINKEDIN") {
     const { data: hl } = await db.from("hand_leads").select("id").eq("project_id", acc.project_id).eq("li_urn", senderId).limit(1);
     if (hl?.length) {
-      await forwardHand(body);
+      if (!muteUntil) await uniMarkRead(chatId, provider); // w ciszy (człowiek przejął rozmowę) nie czytamy za niego
+      await forwardHand({ ...body, muted: !!muteUntil }); // przy ciszy Łowca tylko zapisze wiadomość
       return;
     }
   }
