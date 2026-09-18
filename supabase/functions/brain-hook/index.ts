@@ -359,12 +359,83 @@ async function replyUni(acc: AccountRow, chatId: string, text: string, count = f
   const [lo, hi] = UNI_REPLY_DELAY_MS;
   await new Promise((r) => setTimeout(r, lo + Math.random() * (hi - lo)));
   try {
-    await uniSend(chatId, acc.account_id, acc.provider, text);
+    const res = await uniSend(chatId, acc.account_id, acc.provider, text);
+    await logUniSent(acc.project_id, chatId, String(res?.message_id ?? ""), text);
     if (count) await logEvent(acc.project_id, "uni_reply", { account_id: acc.account_id, chat_id: chatId, provider: acc.provider });
   } catch (e) {
     console.error("unipile send error", acc.provider, String(e).slice(0, 300));
     await logEvent(acc.project_id, "send_error", { channel: PROVIDER_CHANNEL[acc.provider] ?? "unipile", via: "unipile", error: String(e).slice(0, 300) });
   }
+}
+
+// ── człowiek przejmuje rozmowę ─────────────────────────────────────────────
+// Każda wiadomość WYSŁANA z konta klienta (także nasza, przez API) wraca webhookiem
+// `message_received` z nadawcą = właściciel konta. Żeby odróżnić naszego agenta od
+// człowieka piszącego z telefonu, każda wysyłka (tu i w brain-sales) zostawia ślad
+// `uni_sent` z message_id i początkiem treści. Wiadomość własna BEZ takiego śladu =
+// człowiek wszedł do rozmowy → agent milknie w tym czacie na HUMAN_MUTE_H godzin:
+// otwarta rozmowa doradcy zostaje zamknięta, lead sprzedawcy traci zaplanowany follow-up,
+// a przychodzące w tym czasie są tylko zapisywane (sprzedawca) albo pomijane (doradca).
+// Po upływie ciszy pierwsza wiadomość klienta otwiera NOWĄ rozmowę i agent odpowiada jak zwykle.
+const HUMAN_MUTE_H = 48;
+const sentKey = (t: string) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+
+async function logUniSent(projectId: string, chatId: string, messageId: string, text: string) {
+  await logEvent(projectId, "uni_sent", { chat_id: chatId, message_id: messageId, t: sentKey(text) });
+}
+
+async function isOurOwnMessage(chatId: string, messageId: string, text: string): Promise<boolean> {
+  if (messageId) {
+    const { count } = await db.from("brain_events").select("id", { count: "exact", head: true })
+      .eq("type", "uni_sent").eq("data->>message_id", messageId);
+    if ((count ?? 0) > 0) return true;
+  }
+  // webhook potrafi wyprzedzić zapis śladu albo dostawca nadaje inne id — porównanie treści z ostatnich minut
+  const since = new Date(Date.now() - 5 * 60_000).toISOString();
+  const { data } = await db.from("brain_events").select("data").eq("type", "uni_sent").eq("data->>chat_id", chatId).gte("created_at", since).limit(20);
+  const k = sentKey(text);
+  return !!k && (data ?? []).some((r) => String((r.data as Record<string, unknown>)?.t ?? "") === k);
+}
+
+async function uniMuteUntil(chatId: string): Promise<string | null> {
+  const { data } = await db.from("brain_events").select("data, created_at").eq("type", "uni_mute").eq("data->>chat_id", chatId)
+    .order("created_at", { ascending: false }).limit(1);
+  const until = String((data?.[0]?.data as Record<string, unknown>)?.until ?? "");
+  return until && until > new Date().toISOString() ? until : null;
+}
+
+async function handleHumanTakeover(acc: AccountRow, chatId: string, messageId: string, text: string, otherId: string) {
+  if (await isOurOwnMessage(chatId, messageId, text)) return;
+  if (await uniMuteUntil(chatId)) return; // już wyciszone — nie mnożymy zdarzeń
+  const until = new Date(Date.now() + HUMAN_MUTE_H * 3600_000).toISOString();
+  const channel = PROVIDER_CHANNEL[acc.provider] ?? "unipile";
+  const info: Record<string, unknown> = { chat_id: chatId, account_id: acc.account_id, provider: acc.provider, until };
+  // doradca: zamykamy otwartą rozmowę tego gościa
+  const { data: chRows } = await db.from("brain_channels").select("id").eq("project_id", acc.project_id).eq("type", "unipile")
+    .contains("config", { account_id: acc.account_id }).limit(1);
+  if (chRows?.[0] && otherId) {
+    const { data: convs } = await db.from("brain_conversations").select("id, meta").eq("project_id", acc.project_id)
+      .eq("channel_id", chRows[0].id).eq("visitor_id", `${channel}:${otherId}`).eq("status", "open").limit(5);
+    for (const c of convs ?? []) {
+      await db.from("brain_conversations").update({
+        status: "closed", closed_at: new Date().toISOString(),
+        meta: { ...((c.meta as Record<string, unknown>) ?? {}), human_takeover_at: new Date().toISOString(), mute_until: until },
+      }).eq("id", c.id);
+    }
+    if (convs?.length) info.conversation_ids = convs.map((c) => c.id);
+  }
+  // sprzedawca: lead zostaje w swoim statusie, ale bez zaplanowanej wysyłki i z notatką o ciszy
+  const lead = otherId ? await findSalesLead(acc, chatId, otherId) : null;
+  if (lead) {
+    await db.from("brain_leads").update({
+      next_at: null, updated_at: new Date().toISOString(),
+      meta: { ...((lead.meta as Record<string, unknown>) ?? {}), human_takeover_at: new Date().toISOString(), mute_until: until },
+    }).eq("id", lead.id);
+    info.lead_id = lead.id;
+  }
+  await logEvent(acc.project_id, "uni_mute", info);
+  await logEvent(acc.project_id, "human_takeover", info);
+  console.log("unipile: człowiek przejął rozmowę", acc.provider, chatId, "cisza do", until);
 }
 
 async function findSalesLead(acc: AccountRow, chatId: string, senderId: string): Promise<Record<string, unknown> | null> {
@@ -435,8 +506,6 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
     return;
   }
   const provider = acc.provider;
-  // własne wiadomości (z telefonu, z innego urządzenia, z API) też przychodzą jako message_received
-  if (sameActor(senderId, ownId) || sameActor(senderId, acc.provider_user_id)) return;
   // grupy: doradca w grupie rodzinnej klienta to katastrofa — odpowiadamy tylko 1:1
   const attendees = (body.attendees ?? []) as Record<string, unknown>[];
   const others = attendees.filter((a) => {
@@ -444,11 +513,19 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
     return id && !sameActor(id, ownId) && !sameActor(id, acc.provider_user_id);
   });
   if (body.is_group === true || others.length > 1) return;
+  const text = String(body.message ?? "").trim();
+  // własne wiadomości (z telefonu, z innego urządzenia, z API) też przychodzą jako message_received:
+  // nasza wysyłka → cisza; wiadomość człowieka z tego konta → przejęcie rozmowy (agent milknie)
+  if (sameActor(senderId, ownId) || sameActor(senderId, acc.provider_user_id)) {
+    if (await seenBefore(acc.project_id, `uni:${messageId || `${chatId}:${body.timestamp ?? ""}`}`)) return;
+    await handleHumanTakeover(acc, chatId, messageId, text, String(others[0]?.attendee_provider_id ?? ""));
+    return;
+  }
   if (await seenBefore(acc.project_id, `uni:${messageId || `${chatId}:${body.timestamp ?? ""}`}`)) return;
 
-  const text = String(body.message ?? "").trim();
   const hasAttachments = Array.isArray(body.attachments) && (body.attachments as unknown[]).length > 0;
   const channel = PROVIDER_CHANNEL[provider] ?? "unipile";
+  const muteUntil = await uniMuteUntil(chatId);
 
   // 1) LinkedIn: lead Łowcy → Łowca prowadzi rozmowę sam
   if (provider === "LINKEDIN") {
@@ -463,10 +540,15 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
   const salesPayload = {
     project_id: acc.project_id, lead_id: lead ? String(lead.id) : null, channel, provider,
     chat_id: chatId, account_id: accountId, sender_id: senderId, sender_name: senderName, text, message_id: messageId,
-    attachments: hasAttachments,
+    attachments: hasAttachments, muted: !!muteUntil,
   };
   if (lead) {
-    await forwardSales(salesPayload);
+    await forwardSales(salesPayload); // przy ciszy sprzedawca tylko zapisze wiadomość (bez odpowiedzi)
+    return;
+  }
+  // cisza po przejęciu przez człowieka: doradca nie odpowiada, sprzedawca nie zakłada nowych leadów
+  if (muteUntil) {
+    await logEvent(acc.project_id, "uni_muted", { provider, chat_id: chatId, until: muteUntil });
     return;
   }
   // 3) doradca — kanał tego konta włączony w Integracjach

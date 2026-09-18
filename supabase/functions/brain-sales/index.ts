@@ -596,13 +596,22 @@ async function projectAccount(projectId: string, provider: string): Promise<Acco
   return ((data ?? [])[0] ?? null) as AccountRow | null;
 }
 
-async function uniSendInChat(chatId: string, accountId: string, provider: string, text: string) {
+// Ślad każdej wysyłki przez Unipile: brain-hook po nim odróżnia naszą wiadomość (wraca webhookiem
+// jako „własna") od człowieka piszącego z tego samego konta — ten drugi wycisza agenta na 48 h.
+async function logUniSent(projectId: string, chatId: string, messageId: string, text: string) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+  await db.from("brain_events").insert({ project_id: projectId, type: "uni_sent", data: { chat_id: chatId, message_id: messageId, t } });
+}
+
+async function uniSendInChat(chatId: string, accountId: string, provider: string, text: string, projectId = "") {
   const fd = new FormData();
   fd.set("text", text.slice(0, UNI_MAX[provider] ?? 1900));
   fd.set("account_id", accountId);
   if (provider === "WHATSAPP") fd.set("typing_duration", String(Math.min(5000, Math.max(1200, text.length * 35))));
   const res = await uniFetch(`/chats/${encodeURIComponent(chatId)}/messages`, { method: "POST", body: fd }, 30_000);
-  return String(res?.message_id ?? "");
+  const id = String(res?.message_id ?? "");
+  if (projectId) await logUniSent(projectId, chatId, id, text);
+  return id;
 }
 
 // Odpowiedź do leada, z którym rozmowa już istnieje (chat_id z webhooka albo z pierwszej wysyłki).
@@ -612,7 +621,7 @@ async function sendUnipileReply(lead: Lead, text: string) {
   const provider = String(lead.meta?.unipile_provider ?? CHANNEL_PROVIDER[lead.channel] ?? "");
   if (!chatId || !accountId) return { ok: false, error: "brak identyfikatora rozmowy u dostawcy (kanał podłączony linkiem)" };
   try {
-    const id = await uniSendInChat(chatId, accountId, provider, text);
+    const id = await uniSendInChat(chatId, accountId, provider, text, String(lead.project_id ?? ""));
     return { ok: true, id, via: "unipile" };
   } catch (err) {
     return { ok: false, error: String(err).slice(0, 200) };
@@ -650,6 +659,7 @@ async function sendUnipileWhatsApp(projectId: string, cfg: SalesCfg, lead: Lead,
     }, 30_000);
     const chatId = String(res?.chat_id ?? "");
     if (chatId) {
+      await logUniSent(projectId, chatId, String(res?.message_id ?? ""), text);
       await db.from("brain_leads").update({
         meta: { ...(lead.meta ?? {}), unipile_chat_id: chatId, unipile_account_id: acc.account_id, unipile_provider: "WHATSAPP", unipile_attendee: `${to}@s.whatsapp.net` },
       }).eq("id", lead.id);
@@ -1252,6 +1262,14 @@ async function inboundUnipile(body: Record<string, unknown>) {
       return { ok: false, reason: "nie udało się zapisać leada" };
     }
     lead = created as Lead;
+  }
+  if (body.muted === true) {
+    // człowiek przejął rozmowę z tego konta (brain-hook wyciszył agenta) — zapisujemy, nie odpowiadamy
+    await db.from("brain_lead_messages").insert({
+      lead_id: lead.id, project_id: projectId, channel, direction: "in", subject: "", content: (text || "(załącznik / wiadomość bez tekstu)").slice(0, 8000), status: "received",
+    });
+    await db.from("brain_leads").update({ unread: true, last_in_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", lead.id);
+    return { ok: true, replied: false, reason: "human_takeover" };
   }
   if (!text) {
     // załącznik/głosówka — zapisujemy ślad, żeby handlowiec widział, że coś przyszło
