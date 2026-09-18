@@ -1008,3 +1008,54 @@ label.f > span {
     animation-duration: 2.6s;
   }
 }
+
+
+/* baza wiedzy — sprawdzanie stron WWW (okno wyniku + znaczniki na karcie) */
+.kb-flag {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--acid);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+button.kb-flag { cursor: pointer; }
+button.kb-flag:hover { border-color: var(--acid); }
+.kb-flag.warn { border-left-color: var(--danger); color: var(--danger); }
+.modal.kb-check { max-width: 620px; }
+.kb-check-url { font-size: 10.5px; margin: -8px 0 16px; overflow-wrap: anywhere; opacity: 0.8; }
+.kb-check-wait { display: flex; gap: 14px; align-items: center; padding: 8px 0 4px; }
+.kb-check-wait p { font-size: 13px; margin: 0; }
+.kb-spin {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--acid);
+  border-radius: 50%;
+  animation: kb-spin 0.8s linear infinite;
+}
+@keyframes kb-spin { to { transform: rotate(360deg); } }
+.kb-diff { margin-top: 14px; }
+.kb-diff-h { font-size: 10.5px; margin-bottom: 6px; }
+.kb-diff-row {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  border-left: 2px solid transparent;
+  overflow-wrap: anywhere;
+}
+.kb-diff-row + .kb-diff-row { margin-top: 3px; }
+.kb-diff-row.add { border-left-color: var(--ok, var(--acid)); background: color-mix(in srgb, var(--acid) 8%, transparent); }
+.kb-diff-row.del { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); opacity: 0.85; }
+.kb-diff-row.del span:last-child { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 55%, transparent); }
+.kb-diff-sign { flex: 0 0 auto; font-family: 'IBM Plex Mono', monospace; font-weight: 600; }

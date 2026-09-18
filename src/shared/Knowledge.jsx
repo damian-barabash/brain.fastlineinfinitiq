@@ -97,15 +97,20 @@ function KbCard({ it, onChanged, compact }) {
     await api('kb.delete', { id: it.id })
     onChanged()
   }
+  const [check, setCheck] = useState(null) // null | {state:'loading'} | {state:'done', res} | {state:'history', res}
   async function refresh() {
     setBusy(true)
+    setCheck({ state: 'loading' })
     try {
-      await api('kb.refresh', { id: it.id })
-      onChanged()
+      const res = await api('kb.refresh', { id: it.id })
+      setCheck({ state: 'done', res })
+    } catch (e) {
+      setCheck({ state: 'done', res: { ok: false, error: e.message || 'Nie udało się sprawdzić strony' } })
     } finally {
       setBusy(false)
     }
   }
+  const recentChange = it.changed_at && Date.now() - new Date(it.changed_at).getTime() < 7 * 864e5 && it.last_change
   async function save() {
     await api('kb.update', { id: it.id, title, content })
     setEdit(false)
@@ -123,7 +128,7 @@ function KbCard({ it, onChanged, compact }) {
         <b style={{ fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || TYPE_LABEL[it.type]}</b>
         <span className="right row" style={{ gap: 4 }}>
           {it.type === 'url' && (
-            <button className="btn sm" onClick={refresh} disabled={busy} title="Pobierz treść strony ponownie">
+            <button className="btn sm" onClick={refresh} disabled={busy} title="Sprawdź stronę teraz i pokaż, co się zmieniło">
               <IcRefresh />
             </button>
           )}
@@ -175,9 +180,113 @@ function KbCard({ it, onChanged, compact }) {
           </p>
           <div className="mono" style={{ marginTop: 8, fontSize: 9.5 }}>
             {TYPE_LABEL[it.type]} • {it.chars.toLocaleString('pl-PL')} znaków
+            {it.type === 'url' && (
+              <>
+                {' • '}
+                {it.checked_at ? `sprawdzono ${fmtWhen(it.checked_at)}` : 'jeszcze nie sprawdzano'} • auto co 24 h
+              </>
+            )}
           </div>
+          {it.type === 'url' && it.fetch_error && (
+            <div className="kb-flag warn" title="Poprzednia treść została w bazie wiedzy — doradca nadal z niej korzysta">
+              Ostatnie sprawdzenie nieudane: {it.fetch_error}
+            </div>
+          )}
+          {it.type === 'url' && !it.fetch_error && recentChange && (
+            <button type="button" className="kb-flag" onClick={() => setCheck({ state: 'history', res: { ok: true, changed: true, ...it.last_change, checked_at: it.last_change.at } })}>
+              Treść zmieniła się {fmtWhen(it.changed_at)}{it.last_change.auto ? ' (automatycznie)' : ''} — zobacz, co
+            </button>
+          )}
         </>
       )}
+      {check && (
+        <RefreshModal
+          url={it.url}
+          check={check}
+          onClose={() => {
+            const wasRun = check.state === 'done'
+            setCheck(null)
+            if (wasRun) onChanged()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function fmtWhen(iso) {
+  const d = new Date(iso)
+  const today = new Date().toDateString() === d.toDateString()
+  return today
+    ? `dziś ${d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' })}`
+    : d.toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+// Okno sprawdzania strony: najpierw „trwa", potem wynik — bez zmian / co doszło i co znikło / dlaczego się nie udało.
+function RefreshModal({ url, check, onClose }) {
+  const loading = check.state === 'loading'
+  const res = check.res || {}
+  return (
+    <div className="modal-bg" onClick={(e) => !loading && e.target === e.currentTarget && onClose()}>
+      <div className="modal kb-check">
+        <h2>{loading ? 'Sprawdzam stronę…' : check.state === 'history' ? 'Ostatnia zmiana treści' : 'Wynik sprawdzenia'}</h2>
+        <div className="mono kb-check-url">{url}</div>
+        {loading && (
+          <div className="kb-check-wait">
+            <span className="kb-spin" />
+            <p className="muted">Pobieram aktualną treść i porównuję z tym, co doradca ma w bazie wiedzy. To trwa do kilkunastu sekund.</p>
+          </div>
+        )}
+        {!loading && !res.ok && (
+          <div className="note warn">
+            <b>Nie udało się pobrać strony.</b> {res.error}
+            <br />
+            Poprzednia treść została w bazie wiedzy — nic nie zostało skasowane.
+          </div>
+        )}
+        {!loading && res.ok && !res.changed && (
+          <div className="note">
+            <b>Bez zmian.</b> Treść strony jest taka sama jak w bazie wiedzy ({(res.chars_after ?? 0).toLocaleString('pl-PL')} znaków).
+          </div>
+        )}
+        {!loading && res.ok && res.changed && (
+          <>
+            <div className="note">
+              <b>{check.state === 'history' ? 'Treść została zaktualizowana' : 'Zaktualizowano bazę wiedzy'}.</b>{' '}
+              {(res.chars_before ?? 0).toLocaleString('pl-PL')} → {(res.chars_after ?? 0).toLocaleString('pl-PL')} znaków
+              {res.checked_at ? ` • ${fmtWhen(res.checked_at)}` : ''}. Doradca korzysta z nowej treści od następnej rozmowy.
+            </div>
+            <DiffList title="Doszło" sign="+" cls="add" items={res.added} total={res.added_count} />
+            <DiffList title="Zniknęło" sign="−" cls="del" items={res.removed} total={res.removed_count} />
+            {!res.added?.length && !res.removed?.length && <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>Zmienił się tylko układ albo kolejność tekstu — fragmenty są te same.</p>}
+          </>
+        )}
+        {!loading && (
+          <div className="acts">
+            <button className="btn primary sm" onClick={onClose}>
+              <IcCheck /> OK
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function DiffList({ title, sign, cls, items, total }) {
+  if (!items?.length) return null
+  return (
+    <div className="kb-diff">
+      <div className="mono kb-diff-h">
+        {title}: {total ?? items.length}
+        {total > items.length ? ` (pokazuję pierwsze ${items.length})` : ''}
+      </div>
+      {items.map((x, i) => (
+        <div key={i} className={`kb-diff-row ${cls}`}>
+          <span className="kb-diff-sign">{sign}</span>
+          <span>{x}</span>
+        </div>
+      ))}
     </div>
   )
 }

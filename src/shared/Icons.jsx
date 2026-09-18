@@ -118,8 +118,10 @@ export const IcText = (p) => (
 )
 export const IcRefresh = (p) => (
   <I {...p}>
-    <path d="M20 8A8 8 0 105.5 5.5" />
-    <path d="M20 3v5h-5" />
+    <path d="M20 11a8 8 0 00-14.3-4.4L4 8.5" />
+    <path d="M4 4v4.5h4.5" />
+    <path d="M4 13a8 8 0 0014.3 4.4L20 15.5" />
+    <path d="M20 20v-4.5h-4.5" />
   </I>
 )
 export const IcClock = (p) => (

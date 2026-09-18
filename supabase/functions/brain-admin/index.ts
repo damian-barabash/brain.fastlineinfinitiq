@@ -128,6 +128,109 @@ async function fetchUrlText(url: string): Promise<string> {
   }
 }
 
+// ── odświeżanie wpisów „Strona WWW" ─────────────────────────────────────────
+// Stara wersja nadpisywała wiedzę czymkolwiek, co wróciło spod adresu — także stroną błędu 404/500
+// albo pustką przy chwilowej awarii, czyli potrafiła SKASOWAĆ wiedzę doradcy. Teraz: status HTTP
+// musi być 2xx, treść nie może być podejrzanie krótka, a wynik zawiera różnicę (co doszło / co znikło).
+const KB_CRON_KEY = Deno.env.get("KB_CRON_KEY") ?? "";
+const KB_REFRESH_EVERY_H = 24;
+
+async function fetchUrlChecked(url: string, attempt = 0): Promise<{ ok: boolean; text: string; status: number; error?: string }> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const r = await fetch(url, {
+      signal: ctrl.signal,
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.6",
+      },
+    });
+    const html = await r.text();
+    if (!r.ok) return { ok: false, text: "", status: r.status, error: `strona odpowiedziała kodem ${r.status}` };
+    return { ok: true, text: stripHtml(html).slice(0, 20000), status: r.status };
+  } catch (e) {
+    const raw = String(e);
+    // zerwane połączenie / reset TLS bywa chwilowy (kilka żądań naraz do tego samego hosta) — jedna powtórka
+    if (attempt === 0 && !raw.includes("abort")) {
+      clearTimeout(t);
+      await new Promise((r) => setTimeout(r, 900 + Math.random() * 600));
+      return fetchUrlChecked(url, 1);
+    }
+    console.error("kb fetch", url, raw.slice(0, 200));
+    const msg = raw.includes("abort") ? "strona nie odpowiedziała w 15 s" : `nie udało się połączyć ze stroną (${raw.replace(/^\w*Error:\s*/, "").slice(0, 90)})`;
+    return { ok: false, text: "", status: 0, error: msg };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// fragmenty do porównania: zdania, a długie kawałki (menu, listy bez kropek) cięte co ~160 znaków
+function kbFragments(text: string): string[] {
+  const out: string[] = [];
+  for (const sent of String(text ?? "").split(/(?<=[.!?…])\s+/)) {
+    let x = sent.trim();
+    while (x.length > 200) {
+      const cut = x.lastIndexOf(" ", 160);
+      const at = cut > 60 ? cut : 160;
+      out.push(x.slice(0, at).trim());
+      x = x.slice(at).trim();
+    }
+    if (x.length > 2) out.push(x);
+  }
+  // skróty („sp. z o.o.", „ul.", „tel.") tną zdanie na strzępy — krótkie kawałki doklejamy do poprzedniego
+  const merged: string[] = [];
+  for (const f of out) {
+    if (merged.length && (f.length < 14 || merged[merged.length - 1].length < 14)) merged[merged.length - 1] += " " + f;
+    else merged.push(f);
+  }
+  return merged;
+}
+const fragKey = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
+
+function kbDiff(before: string, after: string) {
+  const a = kbFragments(before), b = kbFragments(after);
+  const setA = new Set(a.map(fragKey)), setB = new Set(b.map(fragKey));
+  const added = b.filter((x) => !setA.has(fragKey(x)));
+  const removed = a.filter((x) => !setB.has(fragKey(x)));
+  return {
+    added_count: added.length, removed_count: removed.length,
+    added: added.slice(0, 14).map((x) => x.slice(0, 240)), removed: removed.slice(0, 14).map((x) => x.slice(0, 240)),
+  };
+}
+
+type KbRefreshResult = {
+  ok: boolean; changed: boolean; error?: string; chars_before: number; chars_after: number;
+  added: string[]; removed: string[]; added_count: number; removed_count: number; checked_at: string;
+};
+async function refreshKbItem(it: { id: string; url: string; content: string | null }, auto: boolean): Promise<KbRefreshResult> {
+  const now = new Date().toISOString();
+  const before = String(it.content ?? "");
+  const empty = { added: [], removed: [], added_count: 0, removed_count: 0 };
+  const f = await fetchUrlChecked(it.url);
+  let error = f.ok ? "" : (f.error ?? "błąd pobierania");
+  // strona „działa", ale oddała prawie nic (blokada bota, pusta aplikacja JS, awaria) — nie kasujemy wiedzy
+  if (!error && (f.text.length < 80 || (before.length > 800 && f.text.length < before.length * 0.2))) {
+    error = `strona oddała tylko ${f.text.length} znaków tekstu (było ${before.length}) — zostawiam poprzednią treść`;
+  }
+  if (error) {
+    await db.from("brain_kb_items").update({ checked_at: now, fetch_error: error }).eq("id", it.id);
+    return { ok: false, changed: false, error, chars_before: before.length, chars_after: before.length, checked_at: now, ...empty };
+  }
+  const changed = f.text !== before;
+  const diff = changed ? kbDiff(before, f.text) : empty;
+  const patch: Record<string, unknown> = { checked_at: now, fetch_error: null };
+  if (changed) {
+    Object.assign(patch, {
+      content: f.text, chars: f.text.length, updated_at: now, changed_at: now,
+      last_change: { at: now, auto, chars_before: before.length, chars_after: f.text.length, ...diff },
+    });
+  }
+  await db.from("brain_kb_items").update(patch).eq("id", it.id);
+  return { ok: true, changed, chars_before: before.length, chars_after: f.text.length, checked_at: now, ...diff };
+}
+
 // ── maskowanie sekretów w odpowiedziach do panelu ───────────────────────────
 const SECRET_MASK = "••••";
 const SALES_SECRET_PATHS = [["email", "resend_key"], ["whatsapp", "wa_token"], ["voice", "api_key"], ["voice", "webhook_secret"]];
@@ -531,6 +634,26 @@ Deno.serve(async (req) => {
   const action = String(body.action || "");
 
   try {
+    // ── cron: codzienne odświeżanie stron WWW w bazie wiedzy (pg_cron co godzinę bierze zaległe) ──
+    if (action === "kb.refreshDue") {
+      if (!KB_CRON_KEY || req.headers.get("x-kb-key") !== KB_CRON_KEY) return J({ error: "forbidden" }, 403);
+      const due = new Date(Date.now() - KB_REFRESH_EVERY_H * 3600_000).toISOString();
+      const { data: items } = await db.from("brain_kb_items").select("id, url, content").eq("type", "url").neq("url", "")
+        .or(`checked_at.is.null,checked_at.lt.${due}`).order("checked_at", { ascending: true, nullsFirst: true }).limit(12);
+      const list = (items ?? []) as { id: string; url: string; content: string | null }[];
+      const out = { checked: 0, changed: 0, failed: 0 };
+      for (let i = 0; i < list.length; i += 4) {
+        const res = await Promise.all(list.slice(i, i + 4).map((it) => refreshKbItem(it, true).catch(() => null)));
+        for (const r of res) {
+          out.checked++;
+          if (!r || !r.ok) out.failed++;
+          else if (r.changed) out.changed++;
+        }
+      }
+      console.log("kb.refreshDue", JSON.stringify(out));
+      return J({ ok: true, ...out });
+    }
+
     // ── login (bez sesji) ────────────────────────────────────────────────
     if (action === "login") {
       const login = String(body.login || "").trim();
@@ -971,7 +1094,7 @@ Deno.serve(async (req) => {
           db.from("brain_products").select("*").eq("project_id", pid).order("sort").order("created_at"),
           db
             .from("brain_kb_items")
-            .select("id, product_id, type, title, content, url, file_path, chars, sort, created_at, updated_at")
+            .select("id, product_id, type, title, content, url, file_path, chars, sort, created_at, updated_at, checked_at, changed_at, last_change, fetch_error")
             .eq("project_id", pid)
             .order("sort")
             .order("created_at"),
@@ -1037,7 +1160,10 @@ Deno.serve(async (req) => {
         } else if (type === "url") {
           const url = String(body.url || "").trim();
           row.url = url;
-          row.content = await fetchUrlText(url); // treść strony = wiedza
+          const f = await fetchUrlChecked(url); // treść strony = wiedza
+          if (!f.ok || f.text.length < 80) return J({ error: `Nie udało się pobrać strony: ${f.error ?? "prawie brak tekstu (strona budowana skryptem albo blokuje boty)"}` }, 400);
+          row.content = f.text;
+          row.checked_at = new Date().toISOString();
           if (!row.title) row.title = url.replace(/^https?:\/\//, "").slice(0, 80);
         } else if (type === "file") {
           const name = String(body.file_name || "plik.txt");
@@ -1075,15 +1201,11 @@ Deno.serve(async (req) => {
       }
       case "kb.refresh": {
         // ponowne pobranie treści z URL
-        const { data: it } = await db.from("brain_kb_items").select("project_id, url").eq("id", body.id as string).maybeSingle();
+        const { data: it } = await db.from("brain_kb_items").select("id, project_id, url, content").eq("id", body.id as string).maybeSingle();
         if (!it || !it.url) return J({ error: "not found" }, 404);
         await assertProject(user, it.project_id);
-        const content = await fetchUrlText(it.url);
-        await db
-          .from("brain_kb_items")
-          .update({ content, chars: content.length, updated_at: new Date().toISOString() })
-          .eq("id", body.id as string);
-        return J({ ok: true, chars: content.length });
+        const res = await refreshKbItem(it as { id: string; url: string; content: string | null }, false);
+        return J({ ...res, chars: res.chars_after, url: it.url });
       }
       case "kb.delete": {
         const { data: it } = await db

@@ -59,7 +59,10 @@ export function salesChatStream(body, { onDelta, onDone, onError }) {
           try {
             const jd = JSON.parse(line.slice(5).trim())
             if (jd.d) onDelta?.(jd.d)
-            else if (jd.done) onDone?.(jd)
+            else if (jd.done) {
+              if (jd.append) onDelta?.(jd.append) // kontakt dopisany przez serwer po zakończeniu strumienia
+              onDone?.(jd)
+            }
             else if (jd.error) onError?.(new Error(jd.error))
           } catch {
             /* niepełny chunk */
@@ -109,7 +112,10 @@ export function chatStreamRaw(body, { onDelta, onDone, onError }) {
           try {
             const jd = JSON.parse(line.slice(5).trim())
             if (jd.d) onDelta?.(jd.d)
-            else if (jd.done) onDone?.(jd)
+            else if (jd.done) {
+              if (jd.append) onDelta?.(jd.append) // kontakt dopisany przez serwer po zakończeniu strumienia
+              onDone?.(jd)
+            }
             else if (jd.error) onError?.(new Error(jd.error))
           } catch {
             /* niepełny chunk */
