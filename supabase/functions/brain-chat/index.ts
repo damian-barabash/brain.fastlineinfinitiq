@@ -54,6 +54,25 @@ function fmtPrice(p: { price: number | null; price_mode?: string; price_currency
   return `${num} ${p.price_currency || "PLN"} ${p.price_mode === "brutto" ? "brutto" : "netto"}`;
 }
 
+
+// Co NAPRAWDĘ zniknęło z oferty: usunięte zdanie opisu tniemy na kawałki i zostawiamy te, których nie ma
+// w aktualnym opisie. Ceny z takich kawałków wycinamy — model widząc „nieaktualne: … 4 450 zł" potrafił
+// powiedzieć „oferta się zmieniła" i zaraz podać tę właśnie nieaktualną cenę.
+function goneParts(removed: string[], currentDescription: string): string[] {
+  const cmp = (t: string) => t.toLowerCase().replace(/[–—−]/g, "-").replace(/\s+/g, "");
+  const cur = cmp(currentDescription);
+  const out: string[] = [];
+  for (const sent of removed) {
+    for (const chunk of sent.split(/[,;:]\s+|\s+oraz\s+/)) {
+      const c = chunk.trim().replace(/[.!?]+$/, "");
+      if (c.length < 6 || cur.includes(cmp(c))) continue;
+      const noPrice = c.replace(/\d[\d\s.,]*\s?(zł|pln|eur|usd)(\s*(netto|brutto))?(\/os\.?)?/gi, "").replace(/\s{2,}/g, " ").trim();
+      if (noPrice.length >= 6 && !out.includes(noPrice)) out.push(noPrice);
+    }
+  }
+  return out.slice(0, 10);
+}
+
 function buildSystemPrompt(
   projectName: string,
   adv: Advisor,
@@ -190,7 +209,7 @@ function buildSystemPrompt(
   if (changes && (changes.removed.length || changes.added.length)) {
     lines.push(
       `\n=== UWAGA: OFERTA ZMIENIŁA SIĘ W TRAKCIE TEJ ROZMOWY ===\n` +
-        (changes.removed.length ? `JUŻ NIEAKTUALNE (było wcześniej, teraz tego NIE MA w ofercie):\n${changes.removed.map((x) => `- ${x}`).join("\n")}\n` : "") +
+        (changes.removed.length ? `Z OFERTY ZNIKNĘŁO — już niedostępne. NIE podajesz cen ani szczegółów tych pozycji, mówisz tylko, że nie są już dostępne:\n${changes.removed.map((x) => `- ${x}`).join("\n")}\n` : "") +
         (changes.added.length ? `AKTUALNIE OBOWIĄZUJE:\n${changes.added.map((x) => `- ${x}`).join("\n")}\n` : "") +
         `Jeśli wcześniej w tej rozmowie wspomniałaś o czymś z listy „już nieaktualne" albo klient o to pyta — powiedz wprost i uprzejmie, że w międzyczasie oferta została zaktualizowana i ta informacja jest już nieaktualna, po czym podaj aktualny stan. ` +
         `Nie udawaj, że tego nigdy nie było, i nie potwierdzaj nieaktualnych rzeczy.`,
@@ -625,7 +644,7 @@ Deno.serve(async (req) => {
     for (const p of (ctx.products ?? []) as { name: string; desc_last_change?: { at?: string; removed?: string[]; added?: string[] } | null }[]) {
       const ch = p.desc_last_change;
       if (!ch?.at || new Date(ch.at).getTime() <= new Date(startedAt).getTime()) continue;
-      changes.removed.push(...(ch.removed ?? []).slice(0, 6).map((x) => `${p.name}: ${x}`));
+      changes.removed.push(...goneParts((ch.removed ?? []).slice(0, 6), String((p as { description?: string }).description ?? "")).map((x) => `${p.name}: ${x}`));
       changes.added.push(...(ch.added ?? []).slice(0, 6).map((x) => `${p.name}: ${x}`));
     }
   }
@@ -645,7 +664,7 @@ Deno.serve(async (req) => {
   // notatka idzie też razem z wiadomością klienta (tylko do modelu — w bazie zostaje czysta wiadomość).
   const userForModel = hasChanges
     ? `${message}\n\n[Notatka systemowa, niewidoczna dla klienta: oferta została zaktualizowana w trakcie tej rozmowy. ` +
-      `${changes.removed.length ? `Nieaktualne: ${changes.removed.join(" | ")}. ` : ""}` +
+      `${changes.removed.length ? `Już niedostępne (nie podawaj ich cen ani szczegółów): ${changes.removed.join(" | ")}. ` : ""}` +
       `Odpowiadaj wyłącznie według aktualnej bazy wiedzy; jeśli klient pyta o coś nieaktualnego albo sama o tym wcześniej pisałaś — powiedz, że oferta się zmieniła.]`
     : message;
 
