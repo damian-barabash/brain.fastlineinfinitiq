@@ -1059,3 +1059,14 @@ button.kb-flag:hover { border-color: var(--acid); }
 .kb-diff-row.del { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); opacity: 0.85; }
 .kb-diff-row.del span:last-child { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 55%, transparent); }
 .kb-diff-sign { flex: 0 0 auto; font-family: 'IBM Plex Mono', monospace; font-weight: 600; }
+
+/* baza wiedzy — opis produktu ze źródeł */
+textarea.locked { opacity: 0.72; cursor: not-allowed; background: var(--panel2); }
+.f .hint { display: block; margin-top: 6px; font-size: 11.5px; line-height: 1.45; color: var(--dim, var(--muted)); }
+.kb-desc { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-strong); }
+.kb-desc-box { margin-top: 10px; padding: 9px 11px; border: 1px solid var(--line-strong); font-size: 12.5px; line-height: 1.5; }
+.kb-desc-box .mono { display: block; font-size: 9.5px; margin-bottom: 4px; }
+.kb-desc-box p { margin: 0; overflow-wrap: anywhere; }
+.kb-desc-box.was { opacity: 0.7; }
+.kb-desc-box.now { border-left: 2px solid var(--acid); }
+.kb-page + .kb-page { margin-top: 16px; }

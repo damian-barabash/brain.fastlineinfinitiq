@@ -256,7 +256,7 @@ async function loadSalesContext(projectId: string, cfg: SalesCfg) {
     db.from("brain_projects").select("name").eq("id", projectId).maybeSingle(),
     db
       .from("brain_products")
-      .select("id, name, description, buy_url, sales_name, sales_phone, price, price_mode, price_currency")
+      .select("id, name, description, manual_notes, buy_url, sales_name, sales_phone, price, price_mode, price_currency")
       .eq("project_id", projectId)
       .order("sort"),
     db.from("brain_kb_items").select("product_id, content").eq("project_id", projectId).order("sort"),
@@ -343,6 +343,8 @@ function buildSalesPrompt(
     lines.push(`\n=== PRODUKTY DO SPRZEDANIA ===`);
     for (const p of ctx.products) {
       const parts = [`• ${p.name}: ${p.description}`];
+      const notes = String((p as Record<string, unknown>).manual_notes ?? "");
+      if (notes) parts.push(`  Dodatkowe informacje od właściciela: ${notes}`);
       const price = fmtPrice(p);
       if (price) parts.push(`  Cena: ${price}`);
       if (p.kb) parts.push(`  Szczegóły: ${p.kb}`);

@@ -61,6 +61,7 @@ function buildSystemPrompt(
   products: {
     name: string;
     description: string;
+    manual_notes?: string;
     buy_url: string;
     sales_name: string;
     sales_phone: string;
@@ -137,6 +138,7 @@ function buildSystemPrompt(
     lines.push(`\n=== PRODUKTY ===`);
     for (const p of full) {
       const parts = [`• ${p.name}: ${p.description}`];
+      if (p.manual_notes) parts.push(`  Dodatkowe informacje od właściciela: ${p.manual_notes}`);
       const price = fmtPrice(p);
       if (price) parts.push(`  Cena: ${price}`);
       if (p.kb) parts.push(`  Szczegóły: ${p.kb}`);
@@ -214,7 +216,7 @@ async function loadContextFresh(publicKey: string) {
   const project = ch.brain_projects as unknown as { id: string; name: string };
   const [{ data: adv }, { data: products }, { data: items }, { data: settings }, { data: fb }] = await Promise.all([
     db.from("brain_advisor").select("config").eq("project_id", ch.project_id).maybeSingle(),
-    db.from("brain_products").select("id, name, description, buy_url, sales_name, sales_phone, price, price_mode, price_currency").eq("project_id", ch.project_id).order("sort"),
+    db.from("brain_products").select("id, name, description, manual_notes, buy_url, sales_name, sales_phone, price, price_mode, price_currency").eq("project_id", ch.project_id).order("sort"),
     db.from("brain_kb_items").select("product_id, content").eq("project_id", ch.project_id).order("sort"),
     db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle(),
     db

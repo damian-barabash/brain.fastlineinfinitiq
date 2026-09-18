@@ -78,7 +78,15 @@ export default function Knowledge() {
       </div>
 
       {modal?.kind === 'item' && <ItemModal projId={proj.id} productId={modal.productId} onClose={() => setModal(null)} onDone={() => { setModal(null); load() }} />}
-      {modal?.kind === 'product' && <ProductModal projId={proj.id} product={modal.product} onClose={() => setModal(null)} onDone={() => { setModal(null); load() }} />}
+      {modal?.kind === 'product' && (
+        <ProductModal
+          projId={proj.id}
+          product={modal.product}
+          hasSources={!!modal.product && items.some((i) => i.product_id === modal.product.id)}
+          onClose={() => setModal(null)}
+          onDone={() => { setModal(null); load() }}
+        />
+      )}
     </>
   )
 }
@@ -261,6 +269,93 @@ function RefreshModal({ url, check, onClose }) {
             {!res.added?.length && !res.removed?.length && <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>Zmienił się tylko układ albo kolejność tekstu — fragmenty są te same.</p>}
           </>
         )}
+        {!loading && res.description && <DescResult d={res.description} />}
+        {!loading && (
+          <div className="acts">
+            <button className="btn primary sm" onClick={onClose}>
+              <IcCheck /> OK
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Opis produktu po synchronizacji ze źródłami: było → jest (+ co z opisu wypadło / co doszło).
+function DescResult({ d }) {
+  if (!d) return null
+  return (
+    <div className="kb-desc">
+      <div className="mono kb-diff-h">Opis produktu</div>
+      {d.skipped && <div className="note">Opis bez zmian — {d.skipped}.</div>}
+      {!d.skipped && !d.ok && (
+        <div className="note warn">
+          <b>Opisu nie udało się odświeżyć.</b> {d.error} Poprzedni opis został.
+        </div>
+      )}
+      {!d.skipped && d.ok && !d.changed && <div className="note">Opis produktu zgadza się ze źródłami — bez zmian.</div>}
+      {d.ok && d.changed && (
+        <>
+          <div className="note">
+            <b>Opis produktu został zaktualizowany ze źródeł.</b> Doradca i sprzedawca korzystają z nowego opisu od następnej rozmowy.
+          </div>
+          {d.before && (
+            <div className="kb-desc-box was">
+              <span className="mono">Było</span>
+              <p>{d.before}</p>
+            </div>
+          )}
+          <div className="kb-desc-box now">
+            <span className="mono">Jest</span>
+            <p>{d.after}</p>
+          </div>
+          <DiffList title="Z opisu zniknęło" sign="−" cls="del" items={d.removed} total={d.removed_count} />
+          <DiffList title="Do opisu doszło" sign="+" cls="add" items={d.added} total={d.added_count} />
+        </>
+      )}
+    </div>
+  )
+}
+
+// Przycisk ↻ na karcie produktu: wszystkie strony produktu + opis złożony od nowa ze źródeł.
+function ProductSyncModal({ name, state, onClose }) {
+  const loading = state.state === 'loading'
+  const res = state.res || {}
+  return (
+    <div className="modal-bg" onClick={(e) => !loading && e.target === e.currentTarget && onClose()}>
+      <div className="modal kb-check">
+        <h2>{loading ? 'Synchronizuję produkt…' : state.state === 'history' ? 'Ostatnia zmiana opisu' : 'Wynik synchronizacji'}</h2>
+        <div className="mono kb-check-url">{name}</div>
+        {loading && (
+          <div className="kb-check-wait">
+            <span className="kb-spin" />
+            <p className="muted">Sprawdzam strony produktu, porównuję je z bazą wiedzy i składam opis od nowa ze źródeł. To trwa do pół minuty.</p>
+          </div>
+        )}
+        {!loading && res.error && <div className="note warn">{res.error}</div>}
+        {!loading &&
+          (res.pages || []).map((pg, i) => (
+            <div key={i} className="kb-page">
+              <div className="mono kb-check-url" style={{ margin: '0 0 6px' }}>{pg.url}</div>
+              {!pg.ok && (
+                <div className="note warn">
+                  <b>Nie udało się pobrać strony.</b> {pg.error} Poprzednia treść została.
+                </div>
+              )}
+              {pg.ok && !pg.changed && <div className="note">Strona bez zmian ({(pg.chars_after ?? 0).toLocaleString('pl-PL')} znaków).</div>}
+              {pg.ok && pg.changed && (
+                <>
+                  <div className="note">
+                    <b>Strona się zmieniła.</b> {(pg.chars_before ?? 0).toLocaleString('pl-PL')} → {(pg.chars_after ?? 0).toLocaleString('pl-PL')} znaków.
+                  </div>
+                  <DiffList title="Na stronie doszło" sign="+" cls="add" items={pg.added} total={pg.added_count} />
+                  <DiffList title="Ze strony zniknęło" sign="−" cls="del" items={pg.removed} total={pg.removed_count} />
+                </>
+              )}
+            </div>
+          ))}
+        {!loading && res.description && <DescResult d={res.description} />}
         {!loading && (
           <div className="acts">
             <button className="btn primary sm" onClick={onClose}>
@@ -299,6 +394,16 @@ function fmtPrice(p) {
 }
 
 function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
+  const [sync, setSync] = useState(null) // null | {state:'loading'} | {state:'done', res} | {state:'history', res}
+  async function runSync() {
+    setSync({ state: 'loading' })
+    try {
+      setSync({ state: 'done', res: await api('product.sync', { id: p.id }) })
+    } catch (e) {
+      setSync({ state: 'done', res: { error: e.message || 'Nie udało się zsynchronizować produktu' } })
+    }
+  }
+  const lastDesc = p.desc_last_change && Date.now() - new Date(p.desc_last_change.at).getTime() < 7 * 864e5 ? p.desc_last_change : null
   async function del() {
     if (!confirm(`Usunąć produkt „${p.name}" wraz z jego wiedzą?`)) return
     await api('product.delete', { id: p.id })
@@ -312,6 +417,11 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
         <IcBox style={{ width: 17, height: 17, color: 'var(--acid)' }} />
         <b>{p.name}</b>
         <span className="right row" style={{ gap: 4 }}>
+          {items.length > 0 && (
+            <button className="btn sm" onClick={runSync} disabled={sync?.state === 'loading'} title="Sprawdź strony produktu i zsynchronizuj opis ze źródłami">
+              <IcRefresh />
+            </button>
+          )}
           <button className="btn sm" onClick={onEdit} title="Edytuj produkt">
             <IcEdit />
           </button>
@@ -320,7 +430,34 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
           </button>
         </span>
       </div>
-      <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>{p.description || 'Brak opisu.'}</p>
+      <p className="muted" style={{ fontSize: 13, marginBottom: 6 }}>{p.description || 'Brak opisu.'}</p>
+      {items.length > 0 && (
+        <div className="mono" style={{ fontSize: 9.5, marginBottom: 10 }}>
+          Opis ze źródeł • {p.desc_synced_at ? `zsynchronizowano ${fmtWhen(p.desc_synced_at)}` : 'jeszcze niesynchronizowany — naciśnij ↻'} • auto codziennie rano
+        </div>
+      )}
+      {lastDesc && (
+        <button type="button" className="kb-flag" style={{ marginTop: 0, marginBottom: 10 }} onClick={() => setSync({ state: 'history', res: { description: { ok: true, changed: true, ...lastDesc } } })}>
+          Opis zmienił się {fmtWhen(lastDesc.at)}{lastDesc.auto ? ' (automatycznie)' : ''} — zobacz, co
+        </button>
+      )}
+      {p.manual_notes && (
+        <p style={{ fontSize: 12.5, marginBottom: 10 }}>
+          <span className="mono" style={{ fontSize: 9.5, display: 'block', marginBottom: 3 }}>Opis ręczny</span>
+          {p.manual_notes}
+        </p>
+      )}
+      {sync && (
+        <ProductSyncModal
+          name={p.name}
+          state={sync}
+          onClose={() => {
+            const wasRun = sync.state === 'done'
+            setSync(null)
+            if (wasRun) onChanged()
+          }}
+        />
+      )}
       <div className="row" style={{ gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
         {p.price !== null && p.price !== undefined ? (
           <span className="badge acid">{fmtPrice(p)}</span>
@@ -441,10 +578,11 @@ function ItemModal({ projId, productId, onClose, onDone }) {
   )
 }
 
-function ProductModal({ projId, product, onClose, onDone }) {
+function ProductModal({ projId, product, hasSources, onClose, onDone }) {
   const [f, setF] = useState({
     name: product?.name || '',
     description: product?.description || '',
+    manual_notes: product?.manual_notes || '',
     buy_url: product?.buy_url || '',
     sales_name: product?.sales_name || '',
     sales_phone: product?.sales_phone || '',
@@ -483,8 +621,17 @@ function ProductModal({ projId, product, onClose, onDone }) {
           <input value={f.name} onChange={set('name')} />
         </label>
         <label className="f">
-          <span className="mono">Opis (co to jest, dla kogo)</span>
-          <textarea value={f.description} onChange={set('description')} />
+          <span className="mono">Opis (co to jest, dla kogo){hasSources ? ' — automatyczny' : ''}</span>
+          <textarea value={f.description} onChange={set('description')} readOnly={hasSources} className={hasSources ? 'locked' : undefined} />
+          <span className="hint">
+            {hasSources
+              ? 'Ten opis powstaje sam ze stron i dokumentów produktu, dlatego jest zablokowany. Odświeża się przyciskiem ↻ na karcie produktu i codziennie rano. Własne dopiski wpisz niżej.'
+              : 'Gdy dodasz do produktu stronę WWW, plik albo notatkę, opis zacznie powstawać z nich automatycznie i to pole się zablokuje.'}
+          </span>
+        </label>
+        <label className="f">
+          <span className="mono">Opis ręczny — dodatkowe informacje (opcjonalnie)</span>
+          <textarea value={f.manual_notes} onChange={set('manual_notes')} placeholder="Wszystko, czego nie ma na stronie ani w dokumentach, a doradca ma wiedzieć." />
         </label>
         <label className="f">
           <span className="mono">Link do zakupu</span>

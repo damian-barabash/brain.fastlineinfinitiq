@@ -133,7 +133,7 @@ async function fetchUrlText(url: string): Promise<string> {
 // albo pustką przy chwilowej awarii, czyli potrafiła SKASOWAĆ wiedzę doradcy. Teraz: status HTTP
 // musi być 2xx, treść nie może być podejrzanie krótka, a wynik zawiera różnicę (co doszło / co znikło).
 const KB_CRON_KEY = Deno.env.get("KB_CRON_KEY") ?? "";
-const KB_REFRESH_EVERY_H = 24;
+const KB_REFRESH_EVERY_H = 20; // cron chodzi raz dziennie rano — próg poniżej doby, żeby wczorajsze wpisy były „zaległe"
 
 async function fetchUrlChecked(url: string, attempt = 0): Promise<{ ok: boolean; text: string; status: number; error?: string }> {
   const ctrl = new AbortController();
@@ -229,6 +229,163 @@ async function refreshKbItem(it: { id: string; url: string; content: string | nu
   }
   await db.from("brain_kb_items").update(patch).eq("id", it.id);
   return { ok: true, changed, chars_before: before.length, chars_after: f.text.length, checked_at: now, ...diff };
+}
+
+// ── opis produktu synchronizowany ze źródłami ───────────────────────────────
+// Opis produktu NIE jest już polem wpisywanym ręcznie: model składa go wyłącznie ze źródeł produktu
+// (strony WWW, pliki i notatki dodane jako „wiedza o produkcie"). Dzięki temu, gdy z oferty na stronie
+// coś znika, znika też z opisu — wcześniej opis żył własnym życiem i doradca sprzedawał rzeczy,
+// których już nie było. Własne dopiski właściciela mają osobne pole `manual_notes` (idzie do promptu obok).
+async function askModel(messages: { role: string; content: string }[], maxTokens = 600): Promise<string> {
+  const { data } = await db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle();
+  const ai = (data?.value ?? {}) as Record<string, string | number>;
+  let baseUrl = String(ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
+  if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
+  if (baseUrl && !baseUrl.endsWith("/v1")) baseUrl += "/v1";
+  const key = String(ai.api_key || "").trim() || Deno.env.get(String(ai.key_secret || "BRAIN_AI_KEY").trim()) || "";
+  const model = String(ai.model || "").trim() || "qwen3.5:9b";
+  if (!baseUrl || !key) throw new Error("model AI nie jest skonfigurowany");
+  const r = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0.2, stream: false, messages }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!r.ok) throw new Error(`model: HTTP ${r.status} ${(await r.text().catch(() => "")).slice(0, 120)}`);
+  const j = await r.json();
+  return String(j?.choices?.[0]?.message?.content ?? "").trim();
+}
+
+type DescSync = {
+  ok: boolean; changed: boolean; skipped?: string; error?: string; before: string; after: string;
+  added: string[]; removed: string[]; added_count: number; removed_count: number; at: string;
+};
+// Elementy zdania, które da się sprawdzić mechanicznie: liczby (ceny, daty, godziny) i nazwy własne.
+// Model 9B poproszony o „popraw opis wg źródeł" oddaje tekst bez zmian — dlatego niezgodności szukamy
+// kodem, zdanie po zdaniu, a modelowi zostaje wąskie zadanie: przepisać wskazane zdanie bez wskazanych elementów.
+const compact = (t: string) => t.toLowerCase().replace(/[–—−]/g, "-").replace(/\s+/g, "");
+function unsupportedTokens(sentence: string, srcCompact: string, srcLower: string): string[] {
+  const bad: string[] = [];
+  for (const m of sentence.matchAll(/\d[\d\s.,:–—-]*\d|\d{3,}/g)) {
+    const tok = m[0].trim();
+    if (tok.replace(/\D/g, "").length < 3) continue;
+    if (!srcCompact.includes(compact(tok))) bad.push(tok);
+  }
+  const words = sentence.split(/\s+/);
+  words.forEach((w, i) => {
+    const clean = w.replace(/^[^\p{L}]+|[^\p{L}\d-]+$/gu, "");
+    if (i === 0 || clean.length < 5 || !/^\p{Lu}/u.test(clean)) return;
+    // odmiana: „Magdaleną Piasecką" vs „Magdalena Piasecka" — porównujemy rdzeń
+    const stem = clean.toLowerCase().slice(0, Math.max(4, clean.length - 3));
+    if (!srcLower.includes(stem)) bad.push(clean);
+  });
+  return [...new Set(bad)];
+}
+function parseJsonLoose(raw: string): Record<string, unknown> {
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) return {};
+  try {
+    return JSON.parse(m[0]);
+  } catch {
+    return {};
+  }
+}
+const splitSentences = (t: string) => String(t ?? "").split(/(?<=[.!?…])\s+(?=[\p{Lu}\d„"])/u).map((x) => x.trim()).filter(Boolean);
+
+async function syncProductDescription(productId: string, auto: boolean, addedOnPages: string[] = []): Promise<DescSync> {
+  const at = new Date().toISOString();
+  const none = { added: [], removed: [], added_count: 0, removed_count: 0 };
+  const { data: p } = await db.from("brain_products").select("id, name, description").eq("id", productId).maybeSingle();
+  if (!p) return { ok: false, changed: false, error: "produkt nie istnieje", before: "", after: "", at, ...none };
+  const before = String(p.description ?? "").trim();
+  const { data: items } = await db.from("brain_kb_items").select("type, title, url, content").eq("product_id", productId).order("sort").order("created_at");
+  const sources = (items ?? []).filter((i) => String(i.content ?? "").trim().length > 40);
+  if (!sources.length) return { ok: true, changed: false, skipped: "produkt nie ma jeszcze żadnych źródeł (strony, pliku ani notatki)", before, after: before, at, ...none };
+  let budget = 12000;
+  const blocks: string[] = [];
+  for (const it of sources) {
+    if (budget <= 0) break;
+    const cap = Math.min(budget, it.type === "url" ? 6500 : 4000);
+    const text = String(it.content).slice(0, cap);
+    budget -= text.length;
+    blocks.push(`--- ŹRÓDŁO: ${it.type === "url" ? it.url : it.title || it.type} ---\n${text}`);
+  }
+  const srcAll = sources.map((i) => String(i.content)).join("\n");
+  const srcBlock = blocks.join("\n\n");
+  const srcCompact = compact(srcAll), srcLower = srcAll.toLowerCase();
+  const fail = (e: unknown) => ({ ok: false, changed: false, error: `nie udało się zsynchronizować opisu: ${String((e as Error)?.message ?? e).slice(0, 140)}`, before, after: before, at, ...none });
+
+  let after = "";
+  try {
+    if (before.length < 80) {
+      // brak opisu → pełne wygenerowanie
+      after = await askModel([
+        {
+          role: "system",
+          content:
+            "Piszesz zwięzły opis produktu do bazy wiedzy doradcy AI. Korzystasz WYŁĄCZNIE z podanych źródeł — niczego nie dopowiadasz i nie komentujesz, czego w źródłach brakuje. " +
+            "Czysty tekst po polsku, 4–8 zdań, maksymalnie 900 znaków, bez markdown i bez wstępów. " +
+            "Kolejność: co to jest i dla kogo; termin i miejsce (jeśli są); formuła/przebieg; pakiety i ceny DOKŁADNIE jak w źródłach (z netto/brutto); co jest w cenie. " +
+            "Pomijasz menu strony, stopki, politykę prywatności, dane rejestrowe i teksty przycisków.",
+        },
+        { role: "user", content: `PRODUKT: ${p.name}\n\n${srcBlock}\n\nNapisz opis tego produktu.` },
+      ], 700);
+    } else {
+      const sents = splitSentences(before);
+      const flagged = new Map<number, string[]>();
+      sents.forEach((t, i) => {
+        const bad = unsupportedTokens(t, srcCompact, srcLower);
+        if (bad.length) flagged.set(i, bad);
+      });
+      // Tylko kontrola mechaniczna (liczby, daty, ceny, nazwy własne). „Druga opinia" modelu o zdaniach bez
+      // takich elementów wycinała zdania marketingowe właściciela i dawała inny wynik przy każdym przebiegu.
+      const out = [...sents];
+      for (const [i, bad] of [...flagged.entries()].slice(0, 6)) {
+        // jedno zdanie = jedno wąskie zadanie i odpowiedź czystym tekstem (JSON z polskimi cudzysłowami model 9B psuł)
+        const raw = await askModel([
+          {
+            role: "system",
+            content:
+              "Poprawiasz JEDNO zdanie opisu produktu, żeby zgadzało się ze źródłami. Elementy wskazane jako NIEOBECNE W ŹRÓDŁACH: " +
+              "zastąp ich aktualnym odpowiednikiem ze źródeł (np. nowa data, godziny, cena, miejsce), a jeśli odpowiednika w źródłach nie ma — " +
+              "usuń cały fragment zdania, który ich dotyczy (np. cały pakiet razem z jego ceną i osobą). Resztę zdania zostaw dosłownie. " +
+              "Niczego nie dodajesz od siebie. Odpowiadasz SAMYM poprawionym zdaniem, bez komentarza i bez cudzysłowów. Jeśli nic sensownego nie zostaje, odpowiadasz jednym słowem: USUŃ",
+          },
+          { role: "user", content: `${srcBlock}\n\nZDANIE: ${sents[i]}\nNIEOBECNE W ŹRÓDŁACH: ${bad.join("; ")}` },
+        ], 220).catch(() => "");
+        let fixedSent = raw.split("\n").map((x) => x.trim()).filter(Boolean)[0] ?? "";
+        fixedSent = fixedSent.replace(/^(zdanie|poprawione zdanie)\s*:\s*/i, "").replace(/^[„"']+|[”"']+$/g, "").trim();
+        if (!fixedSent || /^usu[nń]\.?$/i.test(fixedSent)) fixedSent = "";
+        // wynik też przechodzi kontrolę: gdy nadal zawiera coś, czego nie ma w źródłach — zdanie wypada
+        if (fixedSent && unsupportedTokens(fixedSent, srcCompact, srcLower).length) fixedSent = "";
+        console.log("desc fix:", JSON.stringify({ was: sents[i], bad, now: fixedSent }).slice(0, 500));
+        out[i] = fixedSent;
+      }
+      // nowe fakty tylko z tego, co faktycznie DOSZŁO na stronach (bez tego opis puchłby co rano)
+      const fresh = addedOnPages.filter((x) => x.length > 25).slice(0, 12);
+      if (fresh.length) {
+        const add = parseJsonLoose(await askModel([
+          { role: "system", content: 'Na stronie produktu pojawiły się nowe fragmenty. Jeśli któryś zawiera WAŻNY fakt o produkcie (termin, miejsce, pakiet, cena, co w cenie), którego nie ma w obecnym opisie — napisz o nim 1–2 krótkie zdania, wyłącznie na podstawie tych fragmentów. Menu, stopki i hasła reklamowe ignorujesz. Zwróć WYŁĄCZNIE JSON {"dodaj":["zdanie"]} albo {"dodaj":[]}.' },
+          { role: "user", content: `PRODUKT: ${p.name}\n\nOBECNY OPIS:\n${out.filter(Boolean).join(" ")}\n\nNOWE FRAGMENTY NA STRONIE:\n${fresh.map((x) => `- ${x}`).join("\n")}` },
+        ], 250).catch(() => ""));
+        for (const x of (Array.isArray(add.dodaj) ? add.dodaj : []).slice(0, 2)) {
+          const t = String(x ?? "").trim();
+          if (t.length > 15 && !unsupportedTokens(t, srcCompact, srcLower).length) out.push(t);
+        }
+      }
+      after = out.filter(Boolean).join(" ");
+    }
+  } catch (e) {
+    return fail(e);
+  }
+  after = after.replace(/\*\*|__|^#+\s*/gm, "").replace(/[ \t]+/g, " ").trim().slice(0, 1400);
+  if (after.length < 40) return { ok: false, changed: false, error: "po sprawdzeniu ze źródłami z opisu nic nie zostało — zostawiam poprzedni, sprawdź źródła produktu", before, after: before, at, ...none };
+  const changed = fragKey(after) !== fragKey(before);
+  const diff = changed ? kbDiff(before, after) : none;
+  const patch: Record<string, unknown> = { desc_synced_at: at };
+  if (changed) Object.assign(patch, { description: after, updated_at: at, desc_last_change: { at, auto, before, after, ...diff } });
+  await db.from("brain_products").update(patch).eq("id", productId);
+  return { ok: true, changed, before, after: changed ? after : before, at, ...diff };
 }
 
 // ── maskowanie sekretów w odpowiedziach do panelu ───────────────────────────
@@ -638,17 +795,28 @@ Deno.serve(async (req) => {
     if (action === "kb.refreshDue") {
       if (!KB_CRON_KEY || req.headers.get("x-kb-key") !== KB_CRON_KEY) return J({ error: "forbidden" }, 403);
       const due = new Date(Date.now() - KB_REFRESH_EVERY_H * 3600_000).toISOString();
-      const { data: items } = await db.from("brain_kb_items").select("id, url, content").eq("type", "url").neq("url", "")
+      const { data: items } = await db.from("brain_kb_items").select("id, url, content, product_id").eq("type", "url").neq("url", "")
         .or(`checked_at.is.null,checked_at.lt.${due}`).order("checked_at", { ascending: true, nullsFirst: true }).limit(12);
-      const list = (items ?? []) as { id: string; url: string; content: string | null }[];
-      const out = { checked: 0, changed: 0, failed: 0 };
+      const list = (items ?? []) as { id: string; url: string; content: string | null; product_id: string | null }[];
+      const out = { checked: 0, changed: 0, failed: 0, descriptions: 0 };
+      const touched = new Map<string, string[]>();
       for (let i = 0; i < list.length; i += 4) {
-        const res = await Promise.all(list.slice(i, i + 4).map((it) => refreshKbItem(it, true).catch(() => null)));
-        for (const r of res) {
+        const batch = list.slice(i, i + 4);
+        const res = await Promise.all(batch.map((it) => refreshKbItem(it, true).catch(() => null)));
+        res.forEach((r, k) => {
           out.checked++;
           if (!r || !r.ok) out.failed++;
-          else if (r.changed) out.changed++;
-        }
+          else if (r.changed) {
+            out.changed++;
+            const pid = batch[k].product_id;
+            if (pid) touched.set(pid, [...(touched.get(pid) ?? []), ...r.added]);
+          }
+        });
+      }
+      // strona produktu się zmieniła → opis produktu idzie za nią (po kolei: bramka modelu ma limit równoległych wywołań)
+      for (const [pid, added] of [...touched.entries()].slice(0, 4)) {
+        const d = await syncProductDescription(pid, true, added).catch(() => null);
+        if (d?.changed) out.descriptions++;
       }
       console.log("kb.refreshDue", JSON.stringify(out));
       return J({ ok: true, ...out });
@@ -1110,6 +1278,7 @@ Deno.serve(async (req) => {
             project_id: pid,
             name: String(body.name || "").trim(),
             description: String(body.description || ""),
+            manual_notes: String(body.manual_notes || "").slice(0, 4000),
             buy_url: String(body.buy_url || ""),
             sales_name: String(body.sales_name || ""),
             sales_phone: String(body.sales_phone || ""),
@@ -1127,8 +1296,14 @@ Deno.serve(async (req) => {
         if (!p) return J({ error: "not found" }, 404);
         await assertProject(user, p.project_id);
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
-        for (const k of ["name", "description", "buy_url", "sales_name", "sales_phone", "sort"]) {
+        for (const k of ["name", "buy_url", "sales_name", "sales_phone", "sort"]) {
           if (body[k] !== undefined) patch[k] = body[k];
+        }
+        if (body.manual_notes !== undefined) patch.manual_notes = String(body.manual_notes || "").slice(0, 4000);
+        // opis jest zablokowany, gdy produkt ma źródła (powstaje z nich automatycznie) — ręcznie tylko bez źródeł
+        if (body.description !== undefined) {
+          const { count } = await db.from("brain_kb_items").select("id", { count: "exact", head: true }).eq("product_id", body.id as string);
+          if (!count) patch.description = body.description;
         }
         if (body.price !== undefined) patch.price = parsePrice(body.price);
         if (body.price_mode !== undefined) patch.price_mode = body.price_mode === "brutto" ? "brutto" : "netto";
@@ -1187,7 +1362,9 @@ Deno.serve(async (req) => {
         row.chars = String(row.content || "").length;
         const { data, error } = await db.from("brain_kb_items").insert(row).select().single();
         if (error) throw error;
-        return J({ item: data });
+        // nowe źródło produktu (strona, plik, notatka) → opis produktu składa się od nowa
+        const description = row.product_id ? await syncProductDescription(String(row.product_id), false).catch(() => null) : null;
+        return J({ item: data, description });
       }
       case "kb.update": {
         const { data: it } = await db.from("brain_kb_items").select("project_id").eq("id", body.id as string).maybeSingle();
@@ -1196,28 +1373,53 @@ Deno.serve(async (req) => {
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
         for (const k of ["title", "content", "sort", "product_id"]) if (body[k] !== undefined) patch[k] = body[k];
         if (patch.content !== undefined) patch.chars = String(patch.content).length;
-        await db.from("brain_kb_items").update(patch).eq("id", body.id as string);
-        return J({ ok: true });
+        const { data: upd } = await db.from("brain_kb_items").update(patch).eq("id", body.id as string).select("product_id").maybeSingle();
+        const description = patch.content !== undefined && upd?.product_id ? await syncProductDescription(upd.product_id, false).catch(() => null) : null;
+        return J({ ok: true, description });
       }
       case "kb.refresh": {
         // ponowne pobranie treści z URL
-        const { data: it } = await db.from("brain_kb_items").select("id, project_id, url, content").eq("id", body.id as string).maybeSingle();
+        const { data: it } = await db.from("brain_kb_items").select("id, project_id, product_id, url, content").eq("id", body.id as string).maybeSingle();
         if (!it || !it.url) return J({ error: "not found" }, 404);
         await assertProject(user, it.project_id);
         const res = await refreshKbItem(it as { id: string; url: string; content: string | null }, false);
-        return J({ ...res, chars: res.chars_after, url: it.url });
+        // wpis należy do produktu → jego opis ma iść za stroną (także przy pierwszym sprawdzeniu, gdy opis był jeszcze „ręczny")
+        let description: DescSync | null = null;
+        if (it.product_id && res.ok) {
+          const { data: pr } = await db.from("brain_products").select("desc_synced_at").eq("id", it.product_id).maybeSingle();
+          if (res.changed || !pr?.desc_synced_at) description = await syncProductDescription(it.product_id, false, res.added);
+        }
+        return J({ ...res, chars: res.chars_after, url: it.url, description });
+      }
+      case "product.sync": {
+        // przycisk ↻ na karcie produktu: sprawdza wszystkie strony produktu i składa opis od nowa
+        const { data: p } = await db.from("brain_products").select("id, project_id").eq("id", body.id as string).maybeSingle();
+        if (!p) return J({ error: "not found" }, 404);
+        await assertProject(user, p.project_id);
+        const { data: urls } = await db.from("brain_kb_items").select("id, url, content").eq("product_id", p.id).eq("type", "url").neq("url", "").limit(6);
+        const pages: Record<string, unknown>[] = [];
+        const addedAll: string[] = [];
+        for (const u of (urls ?? []) as { id: string; url: string; content: string | null }[]) {
+          const r = await refreshKbItem(u, false);
+          if (r.ok && r.changed) addedAll.push(...r.added);
+          pages.push({ url: u.url, ...r });
+        }
+        const description = await syncProductDescription(p.id, false, addedAll);
+        return J({ ok: true, pages, description });
       }
       case "kb.delete": {
         const { data: it } = await db
           .from("brain_kb_items")
-          .select("project_id, file_path")
+          .select("project_id, product_id, file_path")
           .eq("id", body.id as string)
           .maybeSingle();
         if (!it) return J({ error: "not found" }, 404);
         await assertProject(user, it.project_id);
         if (it.file_path) await db.storage.from("brain-kb").remove([it.file_path]);
         await db.from("brain_kb_items").delete().eq("id", body.id as string);
-        return J({ ok: true });
+        // źródło produktu zniknęło → opis nie może dalej powtarzać tego, co z niego pochodziło
+        const description = it.product_id ? await syncProductDescription(it.product_id, false).catch(() => null) : null;
+        return J({ ok: true, description });
       }
       case "kb.fileUrl": {
         const { data: it } = await db
