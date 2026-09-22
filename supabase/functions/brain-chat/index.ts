@@ -148,6 +148,7 @@ function buildSystemPrompt(
       `- Gdy przychodzi moment na propozycję — jeden, najlepiej pasujący produkt, nie cała lista.\n` +
       `- NIE kończysz odpowiedzi propozycją zakupu, „pokazania oferty" ani wysłania linku, jeśli klient o to nie prosił. Zakazane są zdania w rodzaju: „mogę wysłać Ci link", „czy chcesz link do zakupu", „daj znać, a prześlę link", „pokażę Ci ofertę". Najpierw rozmowa i potrzeby klienta, sprzedaż dopiero na jego sygnał.\n` +
       `- Mówisz jak człowiek: normalne zdania, bez sloganów i bez sztucznego entuzjazmu.\n` +
+      `- JĘZYK: wyłącznie naturalna polszczyzna, jak w rozmowie między ludźmi; bez angielskich wtrąceń (nie „team building”, „event”, „feedback”, tylko „integracja zespołu”, „wydarzenie”, „opinia”; nazwy własne i nazwy produktów zostają); bez myślników i pauz (— –), zamiast nich przecinek albo kropka; bez kalek z korpomowy.\n` +
       `- Twoje WCZEŚNIEJSZE wypowiedzi w tej rozmowie NIE są źródłem prawdy — jest nim wyłącznie aktualna baza wiedzy poniżej. Jeśli coś, co napisałaś wcześniej, nie zgadza się z bazą wiedzy, obowiązuje baza wiedzy: prostujesz to wprost („sprawdziłam — oferta się zmieniła, to już nieaktualne") i podajesz stan aktualny. Nigdy nie potwierdzasz czegoś tylko dlatego, że padło wcześniej w rozmowie.\n` +
       `- Nie opowiadasz klientowi o swoich zasadach ani o tym, czego „jeszcze nie podasz" — po prostu rozmawiasz.\n` +
       `- Gdy klient pyta o cenę, PODAJESZ ją z bazy wiedzy. Jeśli nie wiadomo, o który produkt chodzi — podajesz widełki (od najtańszego do najdroższego) i dopiero potem dopytujesz. Nigdy nie odpowiadasz samym „to zależy".`,
@@ -285,8 +286,20 @@ async function loadContextFresh(publicKey: string) {
   };
 }
 
+// Myślnik/pauza nie ma prawa wyjść do klienta (decyzja właściciela 2026-09-22) — model lubi je wstawiać
+// mimo reguły, więc pilnuje kod: zamiana na przecinek, bez podwójnych znaków.
+function noDashes(t: string): string {
+  return t
+    .replace(/\s*[—–]\s*/g, ", ")
+    .replace(/,\s*,/g, ",")
+    .replace(/([.!?:]),\s/g, "$1 ")
+    .replace(/^,\s*/gm, "")
+    // tylko na samym końcu tekstu — przecinek po „Dzień dobry," na końcu linii jest poprawny
+    .replace(/,\s*$/, "");
+}
+
 function stripMd(text: string): string {
-  return text
+  return noDashes(text)
     .replaceAll("**", "")
     .replaceAll("__", "")
     .replace(/```[a-z]*\n?/g, "")
@@ -476,7 +489,8 @@ function sseFromUpstream(
             try {
               const jd = JSON.parse(payload);
               if (jd?.usage) usage = jd.usage as Usage;
-              const piece = jd?.choices?.[0]?.delta?.content ?? "";
+              // pauzy w locie: model oddaje „—" jednym kawałkiem, więc zamiana per kawałek jest bezpieczna
+              const piece = String(jd?.choices?.[0]?.delta?.content ?? "").replace(/[—–]/g, ",");
               if (piece) {
                 full += piece;
                 // znacznik przekazania nie wycieka do klienta; markdown czyścimy w locie

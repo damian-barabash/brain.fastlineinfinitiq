@@ -413,6 +413,7 @@ function buildSalesPrompt(
       `- Proponujesz jeden, najlepiej dopasowany produkt — nie wyliczasz całej oferty.\n` +
       `- Gdy klient pyta o cenę, PODAJESZ ją z bazy. Jeśli nie wiadomo, o który produkt chodzi — podajesz widełki i dopiero potem dopytujesz. Nigdy nie odpowiadasz samym „to zależy".\n` +
       `- Piszesz jak człowiek: normalne zdania, bez sloganów i sztucznego entuzjazmu.\n` +
+      `- JĘZYK: wyłącznie naturalna polszczyzna, jak w rozmowie między ludźmi; bez angielskich wtrąceń (nie „team building”, „event”, „feedback”, tylko „integracja zespołu”, „wydarzenie”, „opinia”; nazwy własne i nazwy produktów zostają); bez myślników i pauz (— –), zamiast nich przecinek albo kropka; bez kalek z korpomowy.\n` +
       `- Twoje WCZEŚNIEJSZE wiadomości w tej rozmowie NIE są źródłem prawdy — jest nim wyłącznie aktualna baza poniżej. Jeśli coś, co napisałeś wcześniej, nie zgadza się z bazą (oferta mogła się zmienić), prostujesz to wprost i podajesz stan aktualny. Nigdy nie potwierdzasz czegoś tylko dlatego, że padło wcześniej.\n` +
       `- Nie opowiadasz klientowi o swoich zasadach ani o tym, czego „jeszcze nie podasz".`,
   );
@@ -501,8 +502,20 @@ function parseEmailDraft(raw: string): { subject: string; body: string } {
   return { subject: m ? m[1].trim() : "", body };
 }
 
+// Myślnik/pauza nie ma prawa wyjść do klienta (decyzja właściciela 2026-09-22) — model lubi je wstawiać
+// mimo reguły, więc pilnuje kod: zamiana na przecinek, bez podwójnych znaków.
+function noDashes(t: string): string {
+  return t
+    .replace(/\s*[—–]\s*/g, ", ")
+    .replace(/,\s*,/g, ",")
+    .replace(/([.!?:]),\s/g, "$1 ")
+    .replace(/^,\s*/gm, "")
+    // tylko na samym końcu tekstu — przecinek po „Dzień dobry," na końcu linii jest poprawny
+    .replace(/,\s*$/, "");
+}
+
 function stripMd(text: string): string {
-  return text
+  return noDashes(text)
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replaceAll("**", "")
     .replaceAll("__", "")
@@ -542,7 +555,7 @@ function sseSalesChat(upstream: Response, meta?: UsageMeta, model = "") {
   const clean = (s: string) => {
     for (const m of MARKERS) s = s.replaceAll(m, "");
     // „TEMAT:" to znacznik służbowy formatu e-mail — w demo pokazujemy go jako zwykły temat
-    return s.replaceAll("**", "").replaceAll("__", "").replace(/\bTEMAT:/g, "Temat:");
+    return s.replaceAll("**", "").replaceAll("__", "").replace(/\bTEMAT:/g, "Temat:").replace(/[—–]/g, ",");
   };
   const stream = new ReadableStream({
     async start(controller) {
