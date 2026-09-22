@@ -44,6 +44,10 @@ function fmtDay(k) {
   return `${d}.${m}`
 }
 
+// koszt modelu z fiq_ai_usage — prawdziwe tokeny i cennik dostawcy (DeepSeek z cache), nie założenie
+const usd = (n) => (n >= 1 ? n.toFixed(2) : n.toFixed(3)) + ' $'
+const sumCost = (rows) => (rows ?? []).reduce((s, u) => s + Number(u.cost_usd ?? 0), 0)
+
 export default function Dashboard() {
   const proj = session.proj
   const [days, setDays] = useState(30)
@@ -96,7 +100,11 @@ export default function Dashboard() {
     const peakHour = byHour.indexOf(Math.max(...byHour))
 
     const humanCost = Math.round((savedMin / 60) * wage)
+    const cost = sumCost(data.usage)
+    const costSeries = perDay(data.usage ?? [], 'created_at', (u) => Number(u.cost_usd ?? 0))
     return {
+      cost,
+      costSeries,
       convs,
       total: convs.length,
       byStatus,
@@ -208,6 +216,8 @@ function Overview({ S }) {
         <StatCard icon={<IcSpark />} label="Wiadomości Brain AI" value={S.aiMsgs} />
         <StatCard icon={<IcText />} label="Zużyte znaki" value={S.chars.toLocaleString('pl-PL')} />
         <StatCard icon={<IcEye />} label="Godzina szczytu" value={S.userMsgs ? `${S.peakHour}:00` : '—'} />
+        <StatCard icon={<IcWallet />} label="Wydatki na model" value={usd(S.cost)} tone="var(--warn)" />
+        <StatCard icon={<IcWallet />} label="Koszt jednej odpowiedzi" value={S.aiMsgs ? usd(S.cost / S.aiMsgs) : '—'} />
       </div>
       <div className="spacer" />
       <div className="grid gch">
@@ -273,7 +283,9 @@ function SalesStats({ projId, days }) {
       }
       return daysArr.map((d) => map[d])
     }
+    const cost = sumCost(data.usage)
     return {
+      cost,
       total: leads.length,
       by,
       unread: leads.filter((l) => l.unread).length,
@@ -299,6 +311,8 @@ function SalesStats({ projId, days }) {
         <StatCard icon={<IcHandoff />} label="Przekazane człowiekowi" value={S.by.handoff || 0} tone="var(--warn)" />
         <StatCard icon={<IcX />} label="Przegrane / wypisani" value={(S.by.lost || 0) + (S.by.opt_out || 0)} />
         <StatCard icon={<IcEye />} label="Nieprzeczytane odpowiedzi" value={S.unread} tone={S.unread ? 'var(--warn)' : undefined} />
+        <StatCard icon={<IcWallet />} label="Wydatki na model" value={usd(S.cost)} tone="var(--warn)" />
+        <StatCard icon={<IcWallet />} label="Koszt jednej wiadomości" value={S.out ? usd(S.cost / S.out) : '—'} />
       </div>
       <div className="spacer" />
       <div className="grid gch">
@@ -484,13 +498,13 @@ function Conversations({ S, refetch }) {
 }
 
 function Costs({ S, wage, setWage }) {
-  const aiCost = 0.01
+  const aiCost = S.cost
   const humanCost = Math.max(0, Math.round((S.savedMin / 60) * wage * 100) / 100)
   return (
     <>
       <div className="grid g4">
         <StatCard icon={<IcClock />} label="Godziny pracy człowieka (oszczędzone)" value={(S.savedMin / 60).toFixed(1)} suffix="h" />
-        <StatCard icon={<IcWallet />} label="Koszt Brain AI" value="<0,01" suffix="zł" tone="var(--ok)" />
+        <StatCard icon={<IcWallet />} label="Koszt modelu AI" value={usd(S.cost)} tone="var(--ok)" />
         <StatCard icon={<IcUser />} label="Równowartość pracy człowieka" value={humanCost.toLocaleString('pl-PL')} suffix="zł" tone="var(--warn)" />
         <StatCard icon={<IcPulse />} label="Śr. czas odpowiedzi AI" value={S.avgLatency || '—'} suffix="s" />
       </div>
@@ -515,8 +529,8 @@ function Costs({ S, wage, setWage }) {
             <input type="number" min="1" value={wage} onChange={(e) => setWage(Number(e.target.value) || 0)} />
           </label>
           <p className="muted">
-            Jedna odpowiedź AI liczona jako ~{SAVED_MIN_LABEL} min pracy człowieka. Koszt Brain AI przy własnej
-            infrastrukturze jest pomijalny — stąd „&lt;0,01 zł".
+            Jedna odpowiedź AI liczona jako ~{SAVED_MIN_LABEL} min pracy człowieka. Koszt modelu AI to
+            realne tokeny z cennika dostawcy (DeepSeek, z uwzględnieniem cache) — nie założenie.
           </p>
           <div className="spacer" />
           <Bars

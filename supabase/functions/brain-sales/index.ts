@@ -172,6 +172,62 @@ function providerConfig(ai: AiCfg) {
   return { baseUrl, apiKey, model };
 }
 
+
+// ── koszt modelu → fiq_ai_usage (TEN SAM blok w hand-api / brain-chat / brain-admin) ───
+// Cennik DeepSeek (USD za 1M tokenów, stan 2026-09): [wejście bez cache, wejście z cache, wyjście]
+// w szczycie (pn–pt 01–04 i 06–10 UTC); poza szczytem połowa. Lokalny qwen (Barabash AI) = 0.
+const PRICES: Record<string, [number, number, number]> = {
+  "deepseek-v4-pro": [1.32, 0.044, 3.96],
+  "deepseek-reasoner": [1.32, 0.044, 3.96],
+  "deepseek-flash": [0.3, 0.006, 1.2],
+  "deepseek-chat": [0.3, 0.006, 1.2],
+  "deepseek": [0.3, 0.006, 1.2],
+  "gpt-4o-mini": [0.15, 0.075, 0.6],
+  "gpt-4o": [2.5, 1.25, 10],
+};
+function isPeakUtc(d = new Date()) {
+  const day = d.getUTCDay(), h = d.getUTCHours();
+  return day >= 1 && day <= 5 && ((h >= 1 && h < 4) || (h >= 6 && h < 10));
+}
+type Usage = { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+function costUsd(model: string, u: Usage | undefined) {
+  const m = model.toLowerCase();
+  const k = Object.keys(PRICES).find((p) => m.includes(p));
+  if (!k || !u) return 0;
+  const [inMiss, inHit, out] = PRICES[k].map((x) => (isPeakUtc() ? x : x / 2));
+  const pt = Number(u.prompt_tokens ?? 0);
+  const hit = Number(u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return +((miss / 1e6) * inMiss + (hit / 1e6) * inHit + (Number(u.completion_tokens ?? 0) / 1e6) * out).toFixed(6);
+}
+function usageParts(u: Usage | undefined) {
+  const pt = Number(u?.prompt_tokens ?? 0);
+  const hit = Number(u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u?.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return { pt, hit, miss, ct: Number(u?.completion_tokens ?? 0), peak: isPeakUtc() };
+}
+const isDeepSeek = (model: string) => /deepseek/i.test(model);
+type UsageMeta = { projectId: string | null; action: string };
+async function logUsage(meta: UsageMeta | undefined, model: string, u: Usage | undefined) {
+  if (!meta || !u) return;
+  try {
+    await db.from("fiq_ai_usage").insert({
+      product_key: "sales",
+      project_id: meta.projectId,
+      action: meta.action,
+      model,
+      prompt_tokens: Number(u.prompt_tokens ?? 0),
+      completion_tokens: Number(u.completion_tokens ?? 0),
+      cost_usd: costUsd(model, u),
+      cache_hit_tokens: usageParts(u).hit,
+      cache_miss_tokens: usageParts(u).miss,
+      peak: usageParts(u).peak,
+    });
+  } catch (e) {
+    console.error("fiq_ai_usage insert", String(e).slice(0, 120));
+  }
+}
+
 // surowy stream OpenAI-compatible (do testowego czatu)
 async function callProviderStream(ai: AiCfg, messages: unknown[]): Promise<Response | null> {
   const { baseUrl, apiKey, model } = providerConfig(ai);
@@ -186,6 +242,7 @@ async function callProviderStream(ai: AiCfg, messages: unknown[]): Promise<Respo
         temperature: ai.temperature ?? 0.65,
         max_tokens: ai.max_tokens ?? 700,
         messages,
+        ...(isDeepSeek(model) ? { thinking: { type: "disabled" }, stream_options: { include_usage: true } } : {}),
       }),
       signal: AbortSignal.timeout(120_000),
     });
@@ -197,7 +254,7 @@ async function callProviderStream(ai: AiCfg, messages: unknown[]): Promise<Respo
   }
 }
 
-async function callProvider(ai: AiCfg, messages: unknown[]): Promise<string | null> {
+async function callProvider(ai: AiCfg, messages: unknown[], meta?: UsageMeta): Promise<string | null> {
   const { baseUrl, apiKey, model } = providerConfig(ai);
   if (!baseUrl || !apiKey) return null;
   const doFetch = () =>
@@ -210,6 +267,7 @@ async function callProvider(ai: AiCfg, messages: unknown[]): Promise<string | nu
         temperature: ai.temperature ?? 0.65,
         max_tokens: ai.max_tokens ?? 700,
         messages,
+        ...(isDeepSeek(model) ? { thinking: { type: "disabled" } } : {}),
       }),
       signal: AbortSignal.timeout(90_000),
     });
@@ -225,6 +283,7 @@ async function callProvider(ai: AiCfg, messages: unknown[]): Promise<string | nu
       if (!r.ok) return null;
     }
     const data = await r.json();
+    await logUsage(meta, model, data?.usage);
     if (data?.choices?.[0]?.finish_reason === "length") {
       console.error("provider: odpowiedź ucięta limitem max_tokens — podnieś limit w panelu");
     }
@@ -473,9 +532,10 @@ function holdbackSplit(s: string): [string, string] {
   return [s, ""];
 }
 
-function sseSalesChat(upstream: Response) {
+function sseSalesChat(upstream: Response, meta?: UsageMeta, model = "") {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  let usage: Usage | undefined;
   let full = "";
   let carry = "";
   let buf = "";
@@ -501,6 +561,7 @@ function sseSalesChat(upstream: Response) {
             if (payload === "[DONE]") continue;
             try {
               const jd = JSON.parse(payload);
+              if (jd?.usage) usage = jd.usage as Usage;
               const piece = jd?.choices?.[0]?.delta?.content ?? "";
               if (!piece) continue;
               full += piece;
@@ -524,6 +585,7 @@ function sseSalesChat(upstream: Response) {
             })}\n\n`,
           ),
         );
+        if (meta && model) await logUsage(meta, model, usage);
       } catch (e) {
         console.error("sales chat stream", e);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "stream" })}\n\n`));
@@ -811,7 +873,7 @@ async function draftForLead(projectId: string, cfg: SalesCfg, lead: Lead, channe
     ? `Napisz pierwszą wiadomość sprzedażową (${label}) do tego leada.`
     : `Klient nie odpowiedział. Napisz follow-up nr ${lead.attempts + 1} (${channel === "email" ? "e-mail w tym samym wątku" : label}) — z nową wartością, nie "przypominajkę".`;
   msgs.push({ role: "user", content: `POLECENIE HANDLOWCA (wewnętrzne, nie klient): ${instr} Zwróć sam tekst wiadomości.` });
-  const raw = await callProvider(ctx.ai, msgs);
+  const raw = await callProvider(ctx.ai, msgs, { projectId, action: isFirst ? "draft" : "followup" });
   if (!raw) return null;
   const { text, won, lost, handoff } = extractMarkers(raw);
   const { subject, body } = channel === "email" ? parseEmailDraft(text) : { subject: "", body: text };
@@ -1050,7 +1112,7 @@ async function handleInbound(
   for (const h of hist) {
     msgs.push({ role: h.direction === "out" ? "assistant" : "user", content: (h.subject ? `TEMAT: ${h.subject}\n\n` : "") + h.content });
   }
-  const raw = await callProvider(ctx.ai, msgs);
+  const raw = await callProvider(ctx.ai, msgs, { projectId, action: "reply" });
   if (!raw) {
     await db.from("brain_leads").update({ ...patch, status: "replied", attempts: 0 }).eq("id", lead.id);
     return { replied: false, reason: "provider" };
@@ -1502,7 +1564,7 @@ async function analyzeCall(projectId: string, cfg: SalesCfg, lead: Lead, transcr
     'outcome=won gdy klient potwierdził zakup; interested gdy prosi o link/ofertę; followup gdy trzeba oddzwonić;',
     "lost gdy odmówił; handoff gdy prosi o człowieka lub negocjacje.",
   ].join("\n");
-  const raw = await callProvider(ctx.ai, [{ role: "system", content: sys }, { role: "user", content: user }]);
+  const raw = await callProvider(ctx.ai, [{ role: "system", content: sys }, { role: "user", content: user }], { projectId, action: "call" });
   if (!raw) return null;
   try {
     const m = raw.match(/\{[\s\S]*\}/);
@@ -1762,7 +1824,7 @@ Deno.serve(async (req) => {
       }
       const upstream = await callProviderStream(ctx.ai, msgs);
       if (!upstream) return J({ error: "AI niedostępne" }, 502);
-      return sseSalesChat(upstream);
+      return sseSalesChat(upstream, { projectId: dp.projectId, action: "test" }, providerConfig(ctx.ai).model);
     }
 
     // trening sprzedawcy: kciuk w dół z uwagą w testowym czacie. Czat jest

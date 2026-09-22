@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './platform.js'
 import IntegrationsAdmin from './IntegrationsAdmin.jsx'
+import AiCosts from './AiCosts.jsx'
 import { IcPlus, IcTrash, IcKey, IcCheck, IcUsers, IcFolder, IcSpark, IcBox, IcLinkedIn, IcRefresh, IcMap } from './Icons.jsx'
 import { SkelList, SkelCard } from './Skeleton.jsx'
 
@@ -33,11 +34,15 @@ export default function AdminPanel() {
         <button className={tab === 'int' ? 'on' : ''} onClick={() => setTab('int')}>
           Integracje
         </button>
+        <button className={tab === 'costs' ? 'on' : ''} onClick={() => setTab('costs')}>
+          Koszty AI
+        </button>
       </div>
       {tab === 'users' && <Users />}
       {tab === 'ws' && <Workspaces />}
       {tab === 'prod' && <Products />}
       {tab === 'int' && <IntegrationsAdmin />}
+      {tab === 'costs' && <AiCosts />}
     </>
   )
 }

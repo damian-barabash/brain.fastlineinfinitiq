@@ -352,6 +352,64 @@ function providerConfig(ai: AiCfg) {
   return { baseUrl, apiKey, model };
 }
 
+
+// ── koszt modelu → fiq_ai_usage (TEN SAM blok w hand-api / brain-sales / brain-admin) ───
+// Cennik DeepSeek (USD za 1M tokenów, stan 2026-09): [wejście bez cache, wejście z cache, wyjście]
+// w szczycie (pn–pt 01–04 i 06–10 UTC); poza szczytem połowa. Lokalny qwen (Barabash AI) = 0.
+const PRICES: Record<string, [number, number, number]> = {
+  "deepseek-v4-pro": [1.32, 0.044, 3.96],
+  "deepseek-reasoner": [1.32, 0.044, 3.96],
+  "deepseek-flash": [0.3, 0.006, 1.2],
+  "deepseek-chat": [0.3, 0.006, 1.2],
+  "deepseek": [0.3, 0.006, 1.2],
+  "gpt-4o-mini": [0.15, 0.075, 0.6],
+  "gpt-4o": [2.5, 1.25, 10],
+};
+function isPeakUtc(d = new Date()) {
+  const day = d.getUTCDay(), h = d.getUTCHours();
+  return day >= 1 && day <= 5 && ((h >= 1 && h < 4) || (h >= 6 && h < 10));
+}
+type Usage = { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+function costUsd(model: string, u: Usage | undefined) {
+  const m = model.toLowerCase();
+  const k = Object.keys(PRICES).find((p) => m.includes(p));
+  if (!k || !u) return 0;
+  const [inMiss, inHit, out] = PRICES[k].map((x) => (isPeakUtc() ? x : x / 2));
+  const pt = Number(u.prompt_tokens ?? 0);
+  const hit = Number(u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return +((miss / 1e6) * inMiss + (hit / 1e6) * inHit + (Number(u.completion_tokens ?? 0) / 1e6) * out).toFixed(6);
+}
+// modele „myślące" (DeepSeek V4) zjadają max_tokens na rozumowanie i oddają pustą treść — wyłączamy;
+// lokalny qwen tego pola nie zna i je ignoruje
+function usageParts(u: Usage | undefined) {
+  const pt = Number(u?.prompt_tokens ?? 0);
+  const hit = Number(u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u?.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return { pt, hit, miss, ct: Number(u?.completion_tokens ?? 0), peak: isPeakUtc() };
+}
+const isDeepSeek = (model: string) => /deepseek/i.test(model);
+type UsageMeta = { product: string; projectId: string | null; action: string };
+async function logUsage(meta: UsageMeta | undefined, model: string, u: Usage | undefined) {
+  if (!meta || !u) return;
+  try {
+    await db.from("fiq_ai_usage").insert({
+      product_key: meta.product,
+      project_id: meta.projectId,
+      action: meta.action,
+      model,
+      prompt_tokens: Number(u.prompt_tokens ?? 0),
+      completion_tokens: Number(u.completion_tokens ?? 0),
+      cost_usd: costUsd(model, u),
+      cache_hit_tokens: usageParts(u).hit,
+      cache_miss_tokens: usageParts(u).miss,
+      peak: usageParts(u).peak,
+    });
+  } catch (e) {
+    console.error("fiq_ai_usage insert", String(e).slice(0, 120));
+  }
+}
+
 async function callProvider(ai: AiCfg, messages: unknown[], stream: boolean) {
   const { baseUrl, apiKey, model } = providerConfig(ai);
   if (!baseUrl || !apiKey) return null;
@@ -365,6 +423,8 @@ async function callProvider(ai: AiCfg, messages: unknown[], stream: boolean) {
         temperature: ai.temperature ?? 0.6,
         max_tokens: ai.max_tokens ?? 700,
         messages,
+        // DeepSeek: bez „myślenia" + zużycie tokenów w ostatnim kawałku strumienia (do liczenia kosztu)
+        ...(isDeepSeek(model) ? { thinking: { type: "disabled" }, ...(stream ? { stream_options: { include_usage: true } } : {}) } : {}),
       }),
       // bez limitu żądanie wisi aż do wall-clocku izolatu (150 s) — klient patrzy w pustkę
       signal: AbortSignal.timeout(stream ? 120_000 : 90_000),
@@ -389,7 +449,9 @@ function sseFromUpstream(
   upstream: Response,
   first: Record<string, unknown>,
   onFull: (full: string) => Promise<Record<string, unknown>>,
+  usageMeta?: UsageMeta & { model: string },
 ) {
+  let usage: Usage | undefined;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   let full = "";
@@ -413,6 +475,7 @@ function sseFromUpstream(
             if (payload === "[DONE]") continue;
             try {
               const jd = JSON.parse(payload);
+              if (jd?.usage) usage = jd.usage as Usage;
               const piece = jd?.choices?.[0]?.delta?.content ?? "";
               if (piece) {
                 full += piece;
@@ -440,6 +503,7 @@ function sseFromUpstream(
           const extra = await onFull(full);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, ...extra })}\n\n`));
         }
+        if (usageMeta) await logUsage(usageMeta, usageMeta.model, usage);
       } catch (e) {
         console.error("stream error", e);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "stream" })}\n\n`));
@@ -583,7 +647,7 @@ Deno.serve(async (req) => {
         .select("id")
         .single();
       return { feedback_id: fb!.id, message_id: msgId };
-    });
+    }, { product: "advisor", projectId: ctx.project.id, action: "rewrite", model: providerConfig(ctx.ai as AiCfg).model });
   }
 
   // ── trening: zatwierdź (zapamiętaj NA ZAWSZE) albo odrzuć poprawkę ───────
@@ -720,6 +784,7 @@ Deno.serve(async (req) => {
 
   if (!wantStream) {
     const data = await upstream.json();
+    await logUsage({ product: "advisor", projectId: ctx.project.id, action: "chat" }, providerConfig(ctx.ai as AiCfg).model, data?.usage);
     const raw = data?.choices?.[0]?.message?.content ?? "";
     if (!String(raw).trim()) {
       console.error("provider: pusta odpowiedź (non-stream), finish_reason:", data?.choices?.[0]?.finish_reason);
@@ -733,5 +798,5 @@ Deno.serve(async (req) => {
     const { redirected, latency, messageId, append } = await finish(full);
     // `append` = kontakt dopisany po strumieniu — klient czatu dokleja go do ostatniego dymka
     return { conversation_id: cid, redirected, latency, message_id: messageId, append };
-  });
+  }, { product: "advisor", projectId: ctx.project.id, action: "chat", model: providerConfig(ctx.ai as AiCfg).model });
 });

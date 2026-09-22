@@ -241,7 +241,62 @@ async function refreshKbItem(it: { id: string; url: string; content: string | nu
 // (strony WWW, pliki i notatki dodane jako „wiedza o produkcie"). Dzięki temu, gdy z oferty na stronie
 // coś znika, znika też z opisu — wcześniej opis żył własnym życiem i doradca sprzedawał rzeczy,
 // których już nie było. Własne dopiski właściciela mają osobne pole `manual_notes` (idzie do promptu obok).
-async function askModel(messages: { role: string; content: string }[], maxTokens = 600): Promise<string> {
+
+// ── koszt modelu → fiq_ai_usage (TEN SAM blok w hand-api / brain-chat / brain-sales) ───
+// Cennik DeepSeek (USD za 1M tokenów, stan 2026-09): [wejście bez cache, wejście z cache, wyjście]
+// w szczycie (pn–pt 01–04 i 06–10 UTC); poza szczytem połowa. Lokalny qwen (Barabash AI) = 0.
+const PRICES: Record<string, [number, number, number]> = {
+  "deepseek-v4-pro": [1.32, 0.044, 3.96],
+  "deepseek-reasoner": [1.32, 0.044, 3.96],
+  "deepseek-flash": [0.3, 0.006, 1.2],
+  "deepseek-chat": [0.3, 0.006, 1.2],
+  "deepseek": [0.3, 0.006, 1.2],
+  "gpt-4o-mini": [0.15, 0.075, 0.6],
+  "gpt-4o": [2.5, 1.25, 10],
+};
+function isPeakUtc(d = new Date()) {
+  const day = d.getUTCDay(), h = d.getUTCHours();
+  return day >= 1 && day <= 5 && ((h >= 1 && h < 4) || (h >= 6 && h < 10));
+}
+type Usage = { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+function costUsd(model: string, u: Usage | undefined) {
+  const m = model.toLowerCase();
+  const k = Object.keys(PRICES).find((p) => m.includes(p));
+  if (!k || !u) return 0;
+  const [inMiss, inHit, out] = PRICES[k].map((x) => (isPeakUtc() ? x : x / 2));
+  const pt = Number(u.prompt_tokens ?? 0);
+  const hit = Number(u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return +((miss / 1e6) * inMiss + (hit / 1e6) * inHit + (Number(u.completion_tokens ?? 0) / 1e6) * out).toFixed(6);
+}
+function usageParts(u: Usage | undefined) {
+  const pt = Number(u?.prompt_tokens ?? 0);
+  const hit = Number(u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u?.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return { pt, hit, miss, ct: Number(u?.completion_tokens ?? 0), peak: isPeakUtc() };
+}
+const isDeepSeek = (model: string) => /deepseek/i.test(model);
+async function logUsage(projectId: string | null, action: string, model: string, u: Usage | undefined) {
+  if (!u) return;
+  try {
+    await db.from("fiq_ai_usage").insert({
+      product_key: "brain", // synchronizacja bazy wiedzy — wspólna dla doradcy i sprzedawcy
+      project_id: projectId,
+      action,
+      model,
+      prompt_tokens: Number(u.prompt_tokens ?? 0),
+      completion_tokens: Number(u.completion_tokens ?? 0),
+      cost_usd: costUsd(model, u),
+      cache_hit_tokens: usageParts(u).hit,
+      cache_miss_tokens: usageParts(u).miss,
+      peak: usageParts(u).peak,
+    });
+  } catch (e) {
+    console.error("fiq_ai_usage insert", String(e).slice(0, 120));
+  }
+}
+
+async function askModel(messages: { role: string; content: string }[], maxTokens = 600, meta?: { projectId: string | null; action: string }): Promise<string> {
   const { data } = await db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle();
   const ai = (data?.value ?? {}) as Record<string, string | number>;
   let baseUrl = String(ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
@@ -253,11 +308,12 @@ async function askModel(messages: { role: string; content: string }[], maxTokens
   const r = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0.2, stream: false, messages }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0.2, stream: false, messages, ...(isDeepSeek(model) ? { thinking: { type: "disabled" } } : {}) }),
     signal: AbortSignal.timeout(60_000),
   });
   if (!r.ok) throw new Error(`model: HTTP ${r.status} ${(await r.text().catch(() => "")).slice(0, 120)}`);
   const j = await r.json();
+  await logUsage(meta?.projectId ?? null, meta?.action ?? "kb", model, j?.usage);
   return String(j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
@@ -300,8 +356,9 @@ const splitSentences = (t: string) => String(t ?? "").split(/(?<=[.!?…])\s+(?=
 async function syncProductDescription(productId: string, auto: boolean, addedOnPages: string[] = []): Promise<DescSync> {
   const at = new Date().toISOString();
   const none = { added: [], removed: [], added_count: 0, removed_count: 0 };
-  const { data: p } = await db.from("brain_products").select("id, name, description").eq("id", productId).maybeSingle();
+  const { data: p } = await db.from("brain_products").select("id, name, description, project_id").eq("id", productId).maybeSingle();
   if (!p) return { ok: false, changed: false, error: "produkt nie istnieje", before: "", after: "", at, ...none };
+  const usageMeta = { projectId: String(p.project_id ?? "") || null, action: "kb_sync" };
   const before = String(p.description ?? "").trim();
   const { data: items } = await db.from("brain_kb_items").select("type, title, url, content").eq("product_id", productId).order("sort").order("created_at");
   const sources = (items ?? []).filter((i) => String(i.content ?? "").trim().length > 40);
@@ -334,7 +391,7 @@ async function syncProductDescription(productId: string, auto: boolean, addedOnP
             "Pomijasz menu strony, stopki, politykę prywatności, dane rejestrowe i teksty przycisków.",
         },
         { role: "user", content: `PRODUKT: ${p.name}\n\n${srcBlock}\n\nNapisz opis tego produktu.` },
-      ], 700);
+      ], 700, usageMeta);
     } else {
       const sents = splitSentences(before);
       const flagged = new Map<number, string[]>();
@@ -357,7 +414,7 @@ async function syncProductDescription(productId: string, auto: boolean, addedOnP
               "Niczego nie dodajesz od siebie. Odpowiadasz SAMYM poprawionym zdaniem, bez komentarza i bez cudzysłowów. Jeśli nic sensownego nie zostaje, odpowiadasz jednym słowem: USUŃ",
           },
           { role: "user", content: `${srcBlock}\n\nZDANIE: ${sents[i]}\nNIEOBECNE W ŹRÓDŁACH: ${bad.join("; ")}` },
-        ], 220).catch(() => "");
+        ], 220, usageMeta).catch(() => "");
         let fixedSent = raw.split("\n").map((x) => x.trim()).filter(Boolean)[0] ?? "";
         fixedSent = fixedSent.replace(/^(zdanie|poprawione zdanie)\s*:\s*/i, "").replace(/^[„"']+|[”"']+$/g, "").trim();
         if (!fixedSent || /^usu[nń]\.?$/i.test(fixedSent)) fixedSent = "";
@@ -372,7 +429,7 @@ async function syncProductDescription(productId: string, auto: boolean, addedOnP
         const add = parseJsonLoose(await askModel([
           { role: "system", content: 'Na stronie produktu pojawiły się nowe fragmenty. Jeśli któryś zawiera WAŻNY fakt o produkcie (termin, miejsce, pakiet, cena, co w cenie), którego nie ma w obecnym opisie — napisz o nim 1–2 krótkie zdania, wyłącznie na podstawie tych fragmentów. Menu, stopki i hasła reklamowe ignorujesz. Zwróć WYŁĄCZNIE JSON {"dodaj":["zdanie"]} albo {"dodaj":[]}.' },
           { role: "user", content: `PRODUKT: ${p.name}\n\nOBECNY OPIS:\n${out.filter(Boolean).join(" ")}\n\nNOWE FRAGMENTY NA STRONIE:\n${fresh.map((x) => `- ${x}`).join("\n")}` },
-        ], 250).catch(() => ""));
+        ], 250, usageMeta).catch(() => ""));
         for (const x of (Array.isArray(add.dodaj) ? add.dodaj : []).slice(0, 2)) {
           const t = String(x ?? "").trim();
           if (t.length > 15 && !unsupportedTokens(t, srcCompact, srcLower).length) out.push(t);
@@ -555,7 +612,7 @@ async function checkAi(force = false): Promise<Status> {
     const r = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, max_tokens: 1, stream: false, messages: [{ role: "user", content: "ping" }] }),
+      body: JSON.stringify({ model, max_tokens: 1, stream: false, messages: [{ role: "user", content: "ping" }], ...(isDeepSeek(model) ? { thinking: { type: "disabled" } } : {}) }),
       signal: AbortSignal.timeout(30_000),
     });
     const body = await r.text();
@@ -1204,6 +1261,64 @@ Deno.serve(async (req) => {
         return J({ ok: true });
       }
 
+      // ── koszty modelu per projekt (admin) ──────────────────────────────
+      // Liczone dokładnie jak rozlicza DeepSeek: cache hit / cache miss / wyjście, szczyt po czasie
+      // żądania (UTC). Suma za okres dla modeli deepseek-* = kwota z panelu DeepSeeka dla tego klucza.
+      case "usage.report": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const days = Math.min(Math.max(Number(body.days) || 30, 1), 365);
+        const since = body.days === "today"
+          ? new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z").toISOString()
+          : new Date(Date.now() - days * 864e5).toISOString();
+        const rows: Record<string, unknown>[] = [];
+        for (let from = 0; ; from += 5000) {
+          const { data } = await db
+            .from("fiq_ai_usage")
+            .select("project_id, product_key, model, action, prompt_tokens, completion_tokens, cache_hit_tokens, cache_miss_tokens, cost_usd, created_at")
+            .gte("created_at", since).order("created_at").range(from, from + 4999);
+          rows.push(...(data ?? []));
+          if (!data || data.length < 5000) break;
+        }
+        const { data: projs } = await db.from("brain_projects").select("id, name, workspace_id");
+        const { data: wss } = await db.from("brain_workspaces").select("id, name");
+        const wsName = new Map((wss ?? []).map((w) => [w.id, w.name]));
+        const projName = new Map((projs ?? []).map((p) => [p.id, { name: p.name, ws: wsName.get(p.workspace_id) ?? "" }]));
+        type Agg = { project_id: string | null; project: string; workspace: string; product_key: string; model: string; calls: number; prompt: number; hit: number; miss: number; completion: number; cost: number };
+        const agg = new Map<string, Agg>();
+        const daily = new Map<string, number>();
+        for (const r of rows) {
+          const k = `${r.project_id}|${r.product_key}|${r.model}`;
+          const pi = projName.get(String(r.project_id)) ?? { name: r.project_id ? "(usunięty projekt)" : "(bez projektu)", ws: "" };
+          const a = agg.get(k) ?? { project_id: (r.project_id as string) ?? null, project: pi.name, workspace: pi.ws, product_key: String(r.product_key), model: String(r.model), calls: 0, prompt: 0, hit: 0, miss: 0, completion: 0, cost: 0 };
+          a.calls++; a.prompt += Number(r.prompt_tokens ?? 0); a.hit += Number(r.cache_hit_tokens ?? 0); a.miss += Number(r.cache_miss_tokens ?? 0);
+          a.completion += Number(r.completion_tokens ?? 0); a.cost += Number(r.cost_usd ?? 0);
+          agg.set(k, a);
+          const d = String(r.created_at).slice(0, 10);
+          daily.set(d, (daily.get(d) ?? 0) + Number(r.cost_usd ?? 0));
+        }
+        const list = [...agg.values()].map((a) => ({ ...a, cost: +a.cost.toFixed(6) })).sort((x, y) => y.cost - x.cost);
+        const total = +list.reduce((s, a) => s + a.cost, 0).toFixed(6);
+        const deepseek = +list.filter((a) => /deepseek/i.test(a.model)).reduce((s, a) => s + a.cost, 0).toFixed(6);
+        return J({ since, rows: list, total, deepseek, daily: [...daily.entries()].sort().map(([d, c]) => ({ d, cost: +c.toFixed(6) })) });
+      }
+      // Saldo konta DeepSeek — to samo, co właściciel widzi w ich panelu (klucz tylko z sekretu, nie wraca do panelu)
+      case "usage.balance": {
+        if (!admin) return J({ error: "forbidden" }, 403);
+        const { data } = await db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle();
+        const ai = (data?.value ?? {}) as Record<string, string>;
+        const key = String(ai.api_key || "").trim() || Deno.env.get(String(ai.key_secret || "BRAIN_AI_KEY").trim()) || "";
+        if (!/deepseek/i.test(String(ai.base_url || "")) || !key) return J({ ok: false, reason: "Dostawca to nie DeepSeek albo brak klucza" });
+        try {
+          const r = await fetch("https://api.deepseek.com/user/balance", { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) return J({ ok: false, reason: `DeepSeek ${r.status}` });
+          const b = (j?.balance_infos ?? [])[0] ?? {};
+          return J({ ok: true, available: !!j?.is_available, currency: b.currency ?? "USD", total: Number(b.total_balance ?? 0), topped_up: Number(b.topped_up_balance ?? 0), granted: Number(b.granted_balance ?? 0), model: ai.model ?? "" });
+        } catch (e) {
+          return J({ ok: false, reason: String((e as Error).message ?? e).slice(0, 120) });
+        }
+      }
+
       // ── users (admin only) ────────────────────────────────────────────
       case "users.list": {
         if (!admin) return J({ error: "forbidden" }, 403);
@@ -1577,7 +1692,10 @@ Deno.serve(async (req) => {
             .gte("created_at", since)
             .limit(10000),
         ]);
-        return J({ leads: leads ?? [], messages: msgs ?? [] });
+        const { data: usage } = await db
+          .from("fiq_ai_usage").select("cost_usd, action, model, prompt_tokens, completion_tokens, created_at")
+          .eq("project_id", pid).eq("product_key", "sales").gte("created_at", since).limit(20000);
+        return J({ leads: leads ?? [], messages: msgs ?? [], usage: usage ?? [] });
       }
 
       // ── advisor ───────────────────────────────────────────────────────
@@ -2032,7 +2150,11 @@ Deno.serve(async (req) => {
             msgs = msgs.concat(m ?? []);
           }
         }
-        return J({ conversations: convs ?? [], messages: msgs });
+        // koszt modelu: doradca + wspólna synchronizacja bazy wiedzy (product_key brain)
+        const { data: usage } = await db
+          .from("fiq_ai_usage").select("cost_usd, action, model, prompt_tokens, completion_tokens, created_at")
+          .eq("project_id", pid).in("product_key", ["advisor", "brain"]).gte("created_at", since).limit(20000);
+        return J({ conversations: convs ?? [], messages: msgs, usage: usage ?? [] });
       }
 
       default:
