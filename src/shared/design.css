@@ -1070,3 +1070,129 @@ textarea.locked { opacity: 0.72; cursor: not-allowed; background: var(--panel2);
 .kb-desc-box.was { opacity: 0.7; }
 .kb-desc-box.now { border-left: 2px solid var(--acid); }
 .kb-page + .kb-page { margin-top: 16px; }
+
+/* ── kto jest zalogowany: pasek u góry treści + bejdż w prawym rogu ─────────
+   Pasek jest sticky w przewijanym <main>, więc bejdż widać zawsze, a nie
+   nachodzi na .pagehead (tam po prawej bywają przyciski). Ujemne marginesy
+   zjadają padding <main>, żeby pasek dotykał górnej krawędzi. */
+/* ⚠️ Sticky nie wyjdzie poza content-box rodzica, więc ujemny margines górny nie działa
+   (pasek spadał na nagłówek strony). Zamiast tego <main class="has-topbar"> nie ma
+   górnego paddingu, a pasek sam go zastępuje. */
+.main.has-topbar {
+  padding-top: 0;
+}
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 0 -32px 14px;
+  padding: 12px 32px 8px;
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.ubadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px 4px 4px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  max-width: 320px;
+}
+.ub-avatar {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  isolation: isolate;
+}
+/* trzy losowe barwy (hsl po odcieniu) — gradient płynie w pętli, pierścień obraca się */
+.ub-ring {
+  position: absolute;
+  inset: -40%;
+  background: conic-gradient(
+    from var(--ub-a, 0deg),
+    hsl(var(--ub-h1) 90% 58%),
+    hsl(var(--ub-h2) 90% 58%),
+    hsl(var(--ub-h3) 90% 58%),
+    hsl(var(--ub-h1) 90% 58%)
+  );
+  animation: ub-spin 9s linear infinite;
+}
+.ub-core {
+  position: relative;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  background: linear-gradient(
+    135deg,
+    hsl(var(--ub-h1) 85% 52%),
+    hsl(var(--ub-h2) 85% 50%),
+    hsl(var(--ub-h3) 85% 52%),
+    hsl(var(--ub-h1) 85% 52%)
+  );
+  background-size: 300% 300%;
+  animation: ub-flow 6s ease-in-out infinite;
+}
+@keyframes ub-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes ub-flow {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+.ub-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+.ub-name {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ub-role {
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  color: var(--acid);
+}
+@media (max-width: 900px) {
+  .topbar {
+    margin: 0 -14px 12px;
+    padding: 8px 14px 6px;
+  }
+  .ubadge {
+    max-width: 220px;
+    padding-right: 10px;
+  }
+  .ub-name {
+    font-size: 12.5px;
+  }
+}

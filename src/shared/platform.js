@@ -245,6 +245,23 @@ export async function consumeSso() {
   }
 }
 
+// Odświeżenie danych zalogowanego z serwera (imię, rola, kolory awatara). Stara sesja
+// w localStorage nie ma pól dodanych później — bez tego bejdż pokazywałby zastępcze kolory
+// do następnego logowania. Wołane raz przy starcie panelu; błąd sieci nic nie psuje.
+export async function refreshMe() {
+  try {
+    const me = await api('me')
+    if (me?.user?.id) {
+      const cur = session.user || {}
+      localStorage.setItem(LS.user, JSON.stringify({ ...cur, ...me.user }))
+      return me.user
+    }
+  } catch {
+    /* offline / stara sesja — zostaje to, co było */
+  }
+  return null
+}
+
 // ── produkty dostępne dla zalogowanego ──────────────────────────────────────
 export async function loadProducts() {
   const d = await api('products.mine')

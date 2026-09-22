@@ -39,7 +39,7 @@ async function getUser(token: string | undefined): Promise<User | null> {
   if (!token) return null;
   const { data } = await db
     .from("brain_sessions")
-    .select("expires_at, brain_users(id, login, display_name, role, workspace_id, disabled)")
+    .select("expires_at, brain_users(id, login, display_name, role, workspace_id, disabled, avatar)")
     .eq("token", token)
     .maybeSingle();
   if (!data || !data.brain_users) return null;
@@ -833,7 +833,7 @@ Deno.serve(async (req) => {
       const password = String(body.password || "");
       const { data: u } = await db
         .from("brain_users")
-        .select("id, login, display_name, role, workspace_id, pass_hash, disabled")
+        .select("id, login, display_name, role, workspace_id, pass_hash, disabled, avatar")
         .eq("login", login)
         .maybeSingle();
       if (!u || u.disabled || !bcrypt.compareSync(password, u.pass_hash)) {
@@ -845,7 +845,7 @@ Deno.serve(async (req) => {
       await db.from("brain_users").update({ last_login_at: new Date().toISOString() }).eq("id", u.id);
       return J({
         token,
-        user: { id: u.id, login: u.login, display_name: u.display_name, role: u.role, workspace_id: u.workspace_id },
+        user: { id: u.id, login: u.login, display_name: u.display_name, role: u.role, workspace_id: u.workspace_id, avatar: u.avatar },
       });
     }
 
@@ -1209,7 +1209,7 @@ Deno.serve(async (req) => {
         if (!admin) return J({ error: "forbidden" }, 403);
         const { data } = await db
           .from("brain_users")
-          .select("id, login, display_name, role, workspace_id, disabled, created_at, last_login_at")
+          .select("id, login, display_name, role, workspace_id, disabled, created_at, last_login_at, avatar")
           .order("created_at");
         return J({ users: data ?? [] });
       }
@@ -1226,7 +1226,7 @@ Deno.serve(async (req) => {
             role: body.role === "admin" ? "admin" : "client",
             workspace_id: (body.workspace_id as string) || null,
           })
-          .select("id, login, display_name, role, workspace_id, disabled")
+          .select("id, login, display_name, role, workspace_id, disabled, avatar")
           .single();
         if (error) throw error;
         return J({ user: data });
