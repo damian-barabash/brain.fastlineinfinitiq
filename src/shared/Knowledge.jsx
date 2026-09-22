@@ -186,7 +186,7 @@ function KbCard({ it, onChanged, compact }) {
           <p className="muted" style={{ fontSize: 12.5, maxHeight: 60, overflow: 'hidden' }}>
             {it.content ? it.content.slice(0, 180) + (it.content.length > 180 ? '…' : '') : 'Plik binarny — treść nie trafia do promptu.'}
           </p>
-          <div className="mono" style={{ marginTop: 8, fontSize: 9.5 }}>
+          <div className="mono" style={{ marginTop: 8, fontSize: 11 }}>
             {TYPE_LABEL[it.type]} • {it.chars.toLocaleString('pl-PL')} znaków
             {it.type === 'url' && (
               <>
@@ -432,7 +432,7 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
       </div>
       <p className="muted" style={{ fontSize: 13, marginBottom: 6 }}>{p.description || 'Brak opisu.'}</p>
       {items.length > 0 && (
-        <div className="mono" style={{ fontSize: 9.5, marginBottom: 10 }}>
+        <div className="mono" style={{ fontSize: 11, marginBottom: 10 }}>
           Opis ze źródeł • {p.desc_synced_at ? `zsynchronizowano ${fmtWhen(p.desc_synced_at)}` : 'jeszcze niesynchronizowany — naciśnij ↻'} • auto codziennie rano
         </div>
       )}
@@ -443,7 +443,7 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
       )}
       {p.manual_notes && (
         <p style={{ fontSize: 12.5, marginBottom: 10 }}>
-          <span className="mono" style={{ fontSize: 9.5, display: 'block', marginBottom: 3 }}>Opis ręczny</span>
+          <span className="mono" style={{ fontSize: 11, display: 'block', marginBottom: 3 }}>Opis ręczny</span>
           {p.manual_notes}
         </p>
       )}

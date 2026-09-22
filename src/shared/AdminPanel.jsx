@@ -270,7 +270,7 @@ function Workspaces() {
             </div>
           </div>
           <WsProjects ws={w} prods={prods.filter((p) => (map[w.id] ?? []).includes(p.key))} />
-          <p className="mono" style={{ marginTop: 10, fontSize: 9.5 }}>
+          <p className="mono" style={{ marginTop: 10, fontSize: 11 }}>
             utworzony {new Date(w.created_at).toLocaleDateString('pl-PL')}
           </p>
         </div>
@@ -354,7 +354,7 @@ function WsProjects({ ws, prods }) {
                   {prods.length === 0 && <span className="muted">Najpierw przypisz produkty do workspace'u.</span>}
                 </div>
                 {keys.length === 0 && prods.length > 0 && (
-                  <p className="mono" style={{ fontSize: 9.5, opacity: 0.6, marginTop: 4 }}>
+                  <p className="mono" style={{ fontSize: 11, opacity: 0.8, marginTop: 4 }}>
                     bez przypisania — widoczny we wszystkich produktach workspace'u
                   </p>
                 )}

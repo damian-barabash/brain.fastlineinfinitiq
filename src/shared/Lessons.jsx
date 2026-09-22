@@ -1,20 +1,20 @@
-// ── Poprawki trenera (wspólne dla doradcy i sprzedawcy) ─────────────────────
+// ── Poprawki trenera (wspólne dla doradcy, sprzedawcy i Łowcy) ───────────────
 // Wszystko, co daliśmy agentowi w czatach, leży w jednym miejscu: włączone
 // wskazówki dopisują się do jego instrukcji przy KAŻDEJ odpowiedzi, więc muszą
-// dać się przejrzeć, poprawić i skasować. Doradca i sprzedawca mają osobne
-// zbiory (scope) — ta sama uwaga potrafi być dobra dla jednego i zła dla drugiego.
+// dać się przejrzeć, poprawić i skasować. Każdy agent ma osobny zbiór (scope:
+// advisor / sales / hand) — ta sama uwaga potrafi być dobra dla jednego i zła dla drugiego.
 import { useEffect, useState } from 'react'
 import { api } from './platform.js'
 import { IcThumbUp, IcEdit, IcTrash, IcCheck, IcPlus } from './Icons.jsx'
 import { SkelList } from './Skeleton.jsx'
 
 const LESSON_STATUS = {
-  approved: { label: 'Działa', cls: 'acid', hint: 'Doradca stosuje tę wskazówkę w każdej odpowiedzi.' },
+  approved: { label: 'Działa', cls: 'acid', hint: 'Agent stosuje tę wskazówkę w każdej odpowiedzi.' },
   pending: { label: 'Czeka', cls: 'warn', hint: 'Zapisana, ale jeszcze nie wpływa na odpowiedzi.' },
   rejected: { label: 'Odrzucona', cls: '', hint: 'Zignorowana — zostaje tylko w historii.' },
 }
 
-export default function Lessons({ projId, scope = 'advisor', title, hint }) {
+export default function Lessons({ projId, scope = 'advisor', title, hint, delay }) {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
@@ -75,7 +75,7 @@ export default function Lessons({ projId, scope = 'advisor', title, hint }) {
   }
 
   async function remove(row) {
-    if (!confirm('Usunąć tę poprawkę na stałe? Doradca przestanie ją stosować.')) return
+    if (!confirm('Usunąć tę poprawkę na stałe? Agent przestanie jej stosować.')) return
     setBusy(row.id)
     try {
       await api('lessons.delete', { id: row.id })
@@ -97,7 +97,14 @@ export default function Lessons({ projId, scope = 'advisor', title, hint }) {
         <b>{title || 'Poprawki z czatów'}</b>
         <span className="badge acid">{active} w użyciu</span>
         {waiting > 0 && <span className="badge warn">{waiting} czeka</span>}
-        <button className="btn sm right" onClick={() => setOpen(!open)}>
+        <button
+          className="btn sm right"
+          onClick={() => {
+            // poprawka dodana chwilę temu w czacie ma być na liście od razu, bez odświeżania strony
+            if (!open) load()
+            setOpen(!open)
+          }}
+        >
           {open ? 'Zwiń' : 'Pokaż i edytuj'}
         </button>
       </div>
@@ -162,7 +169,7 @@ export default function Lessons({ projId, scope = 'advisor', title, hint }) {
                   {isEdit ? (
                     <>
                       <label className="f">
-                        <span className="mono">Wskazówka dla doradcy</span>
+                        <span className="mono">Wskazówka dla agenta</span>
                         <textarea
                           rows={2}
                           value={edit.note ?? ''}
@@ -218,7 +225,7 @@ export default function Lessons({ projId, scope = 'advisor', title, hint }) {
             })}
           </div>
           <p className="chart-tip" style={{ marginTop: 10 }}>
-            Zmiana wchodzi do rozmów w ciągu ~20 sekund (tyle żyje cache kontekstu doradcy).
+            {delay || 'Zmiana wchodzi do rozmów w ciągu ~20 sekund (tyle żyje cache kontekstu doradcy).'}
           </p>
         </>
       )}

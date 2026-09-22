@@ -58,6 +58,11 @@ async function getUser(token: string | undefined): Promise<User | null> {
   return u;
 }
 
+// Zbiory wskazówek trenera są osobne dla każdego agenta platformy: doradca (Brain),
+// sprzedawca (Brain) i Łowca (Hand). Uwaga dobra dla jednego psuje drugiego.
+const LESSON_SCOPES = ["advisor", "sales", "hand"];
+const lessonScope = (v: unknown) => (LESSON_SCOPES.includes(String(v)) ? String(v) : "advisor");
+
 // klient widzi tylko swój workspace
 function wsAllowed(u: User, wsId: string) {
   return u.role === "admin" || u.workspace_id === wsId;
@@ -1665,7 +1670,7 @@ Deno.serve(async (req) => {
         await assertProject(user, pid);
         // scope rozdziela trenowanie doradcy od trenowania sprzedawcy — to dwie
         // różne role i wskazówka dobra dla jednej potrafi zepsuć drugą
-        const scope = body.scope === "sales" ? "sales" : "advisor";
+        const scope = lessonScope(body.scope);
         const { data } = await db
           .from("brain_feedback")
           .select("id, rating, note, original, corrected, status, scope, created_at, conversation_id, message_id")
@@ -1686,10 +1691,10 @@ Deno.serve(async (req) => {
           .from("brain_feedback")
           .insert({
             project_id: pid,
-            scope: body.scope === "sales" ? "sales" : "advisor",
+            scope: lessonScope(body.scope),
             rating: "down",
             note,
-            original: "",
+            original: String(body.original ?? "").slice(0, 4000),
             corrected: String(body.corrected ?? "").slice(0, 4000),
             status: "approved",
           })

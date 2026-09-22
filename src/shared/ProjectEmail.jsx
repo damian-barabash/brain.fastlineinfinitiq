@@ -115,7 +115,7 @@ export default function ProjectEmail({ projectId, note }) {
       </div>
 
       {cfg.resend_key?.startsWith(MASK) && (
-        <p className="mono" style={{ fontSize: 9.5, opacity: 0.55, marginTop: 8 }}>
+        <p className="mono" style={{ fontSize: 11, opacity: 0.8, marginTop: 8 }}>
           klucz zapisany — pole pokazuje tylko końcówkę; zostaw jak jest, żeby go nie zmieniać
         </p>
       )}
