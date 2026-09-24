@@ -6,6 +6,7 @@ import { api, session, salesApi, FN_BASE } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
 import SalesChat from '../components/SalesChat.jsx'
 import Lessons from '../shared/Lessons.jsx'
+import ProgressModal from '../shared/ProgressModal.jsx'
 import {
   IcPlus,
   IcTrash,
@@ -356,10 +357,38 @@ function Leads({ projId, hookKey }) {
   const [search, setSearch] = useState('')
   const [sel, setSel] = useState(null)
   const [modal, setModal] = useState(null) // 'add' | 'import'
+  // ręczna wysyłka do nowych leadów z oknem postępu (ten sam mechanizm co w AI Łowcy Leadów)
+  const [prog, setProg] = useState(null)
+  const cancelRef = useRef(false)
 
   useEffect(() => {
     if (data) setLeads(data.leads)
   }, [data])
+
+  const newLeads = (leads ?? []).filter((l) => l.status === 'new')
+  async function sendNew() {
+    if (!newLeads.length || !hookKey) return
+    const batch = newLeads.slice(0, 10)
+    if (!confirm(`Wysłać pierwszą wiadomość do ${batch.length} nowych leadów? Każda idzie kanałem leada (e-mail / WhatsApp / telefon).`)) return
+    cancelRef.current = false
+    setProg({ total: batch.length, done: 0, lines: [{ text: 'Zaczynam…' }], running: true })
+    let sent = 0, failed = 0
+    for (let i = 0; i < batch.length; i++) {
+      if (cancelRef.current) break
+      const l = batch[i]
+      const who = l.name || l.company || l.email || l.phone || 'lead'
+      try {
+        await salesApi(hookKey, 'send', { lead_id: l.id })
+        sent++
+        setProg((p) => ({ ...p, done: i + 1, lines: [...p.lines, { text: `${who} · ${l.channel || 'e-mail'}`, ok: true }] }))
+      } catch (e) {
+        failed++
+        setProg((p) => ({ ...p, done: i + 1, lines: [...p.lines, { text: `${who} · ${e.message}`, ok: false }] }))
+      }
+    }
+    setProg((p) => ({ ...p, running: false, lines: [...p.lines, { text: `Wysłano ${sent}${failed ? `, błędów ${failed}` : ''}.` }] }))
+    refetch()
+  }
 
   if (!leads) return <SkelList rows={5} />
   const shown = leads.filter((l) => {
@@ -393,11 +422,25 @@ function Leads({ projId, hookKey }) {
           <button className="btn sm" onClick={() => setModal('import')}>
             <IcUpload /> Import
           </button>
+          <button className="btn sm primary" onClick={sendNew} disabled={!newLeads.length || !hookKey} title="Pierwsza wiadomość do nowych leadów, którym agent jeszcze nie pisał (do 10 na klik)">
+            <IcSend /> Wyślij do nowych{newLeads.length ? ` (${newLeads.length})` : ''}
+          </button>
           <button className="btn sm primary" onClick={() => setModal('add')}>
             <IcPlus /> Dodaj leada
           </button>
         </span>
       </div>
+      <ProgressModal
+        open={!!prog}
+        title="Wysyłka do nowych"
+        subtitle="Każdy lead: sprzedawca pisze wiadomość i wysyła ją kanałem leada."
+        done={prog?.done ?? 0}
+        total={prog?.total ?? 0}
+        lines={prog?.lines ?? []}
+        running={!!prog?.running}
+        onCancel={() => { cancelRef.current = true }}
+        onClose={() => setProg(null)}
+      />
 
       <div className="grid" style={{ gridTemplateColumns: sel ? 'minmax(300px,1fr) minmax(340px,1.1fr)' : '1fr' }}>
         <div className="card" style={{ padding: 0, overflowX: 'auto', alignSelf: 'start' }}>

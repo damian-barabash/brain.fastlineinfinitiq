@@ -175,20 +175,63 @@ const READ_TIMEOUT_MS = 30_000
 // osobnego OPTIONS przed każdym wywołaniem — dwa razy mniej podróży do bramki
 // (przy jej spowolnieniu każda kosztuje sekundy). Funkcje czytają body przez
 // req.json(), które nie patrzy na Content-Type — sprawdzone na każdej z nich.
+// ── wskaźnik pracy (cała platforma) ──────────────────────────────────────
+// Każdy ZAPIS na serwer (mutacja przez postEdge) zaświeca pasek u góry ekranu
+// (`html.fiq-busy`, CSS w design.css) i kręci kółkiem na przycisku, który został
+// kliknięty chwilę wcześniej. Żaden ekran nie musi tego robić sam — klik bez
+// reakcji wyglądał jak zepsuty przycisk (uwaga właściciela 2026-09-23).
+const busy = { n: 0, lastClick: null, at: 0 }
+export function installBusyUi() {
+  if (typeof document === 'undefined' || window.__fiqBusyUi) return
+  window.__fiqBusyUi = true
+  document.addEventListener(
+    'pointerdown',
+    (e) => {
+      const b = e.target?.closest?.('button, .btn, [role="button"]')
+      if (b) {
+        busy.lastClick = b
+        busy.at = Date.now()
+      }
+    },
+    true,
+  )
+}
+export function busyStart() {
+  busy.n++
+  document.documentElement.classList.add('fiq-busy')
+  const b = busy.lastClick
+  // klik ≤ 1,5 s temu na przycisku, który nadal jest w DOM — to on „pracuje"
+  if (b && Date.now() - busy.at < 1500 && b.isConnected && !b.classList.contains('is-busy')) {
+    b.classList.add('is-busy')
+    return b
+  }
+  return null
+}
+export function busyEnd(btn) {
+  busy.n = Math.max(0, busy.n - 1)
+  if (!busy.n) document.documentElement.classList.remove('fiq-busy')
+  if (btn) btn.classList.remove('is-busy')
+}
+
 export async function postEdge(fn, body, { read = false } = {}) {
   const payload = JSON.stringify(body)
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fetch(`${FN_BASE}/${fn}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-        body: payload,
-        signal: read && typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(READ_TIMEOUT_MS) : undefined,
-      })
-    } catch (e) {
-      if (read && attempt === 0) continue
-      throw new Error(e?.name === 'TimeoutError' ? 'Serwer nie odpowiada — spróbuj ponownie' : 'Brak połączenia z serwerem')
+  const btn = read ? null : busyStart()
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fetch(`${FN_BASE}/${fn}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: payload,
+          signal: read && typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(READ_TIMEOUT_MS) : undefined,
+        })
+      } catch (e) {
+        if (read && attempt === 0) continue
+        throw new Error(e?.name === 'TimeoutError' ? 'Serwer nie odpowiada — spróbuj ponownie' : 'Brak połączenia z serwerem')
+      }
     }
+  } finally {
+    if (!read) busyEnd(btn)
   }
 }
 

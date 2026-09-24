@@ -13,3 +13,4 @@ export { default as ChannelsConnect, PROVIDERS as CHANNEL_PROVIDERS, providerMet
 export { default as Connect } from './Connect.jsx'
 export { default as UserBadge } from './UserBadge.jsx'
 export { default as AiCosts } from './AiCosts.jsx'
+export { default as ProgressModal } from './ProgressModal.jsx'
