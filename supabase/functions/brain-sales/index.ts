@@ -310,17 +310,25 @@ const TEMP_STYLE: Record<string, string> = {
     "Sprzedajesz zdecydowanie: mocne otwarcie, konkret, poczucie okazji i wyraźne wezwanie do decyzji. Nadal profesjonalnie — bez kłamstw i sztucznej presji.",
 };
 
+// Te same limity bazy wiedzy co u doradcy (brain-chat) i Łowcy (hand-api): silny model dostaje całą bazę
+const isWeakModel = (model: string) => /qwen|llama|mistral|gemma|phi|:\d+b/i.test(model);
+function todayLine(): string {
+  const f = new Intl.DateTimeFormat("pl-PL", { timeZone: "Europe/Warsaw", weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date());
+  return `DZISIAJ jest ${f} (czas polski). Terminy i daty wcześniejsze niż dziś już minęły — nie proponujesz ich. Gdy klient pyta o termin, podajesz najbliższe PRZYSZŁE terminy z bazy (kalendarz), z datą, godziną i miejscem. Przed odpowiedzią o terminach przejrzyj CAŁĄ listę z kalendarza i wymień KAŻDY termin, który pasuje do pytania (np. wszystkie w danym miesiącu), żadnego nie pomijając; liczba miejsc w kalendarzu to wielkość grupy, a nie wolne miejsca.`;
+}
+
 async function loadSalesContext(projectId: string, cfg: SalesCfg) {
   const [{ data: proj }, { data: products }, { data: items }, ai] = await Promise.all([
     db.from("brain_projects").select("name").eq("id", projectId).maybeSingle(),
     db
       .from("brain_products")
-      .select("id, name, description, manual_notes, buy_url, sales_name, sales_phone, price, price_mode, price_currency, desc_last_change")
+      .select("id, name, description, manual_notes, buy_url, sales_name, sales_phone, price, price_mode, price_currency, desc_last_change, offer_mode")
       .eq("project_id", projectId)
       .order("sort"),
     db.from("brain_kb_items").select("product_id, content").eq("project_id", projectId).order("sort"),
     aiSettings(),
   ]);
+  const strong = !isWeakModel(String(ai?.model ?? "qwen3.5:9b"));
   const focusIds = cfg.product_ids ?? [];
   const focus = (products ?? []).filter((p) => !focusIds.length || focusIds.includes(p.id));
   const prods = focus.map((p) => ({
@@ -329,13 +337,13 @@ async function loadSalesContext(projectId: string, cfg: SalesCfg) {
       .filter((i) => i.product_id === p.id && i.content)
       .map((i) => i.content)
       .join("\n")
-      .slice(0, 600),
+      .slice(0, strong ? 8000 : 600),
   }));
   const firmText = (items ?? [])
     .filter((i) => !i.product_id && i.content)
     .map((i) => i.content)
     .join("\n")
-    .slice(0, 1600);
+    .slice(0, strong ? 30000 : 1600);
   // wskazówki trenera dla SPRZEDAWCY — osobny zbiór niż doradcy (inna rola,
   // inne błędy); zatwierdzone dopisują się do jego instrukcji
   const { data: fb } = await db
@@ -367,6 +375,13 @@ function goneParts(removed: string[], currentDescription: string): string[] {
     }
   }
   return out.slice(0, 10);
+}
+
+// Jak agent proponuje produkt (brain_products.offer_mode) — TA SAMA reguła w brain-chat, brain-sales i hand-api
+function offerModeLine(mode?: string | null): string {
+  if (mode === "main") return "  Rola w ofercie: GŁÓWNA OFERTA. To proponujesz w pierwszej kolejności, gdy klient jeszcze nie wie, czego szuka.";
+  if (mode === "on_request") return "  Rola w ofercie: TYLKO NA PYTANIE. Nie wspominasz o nim sam z siebie (ani w powitaniu, ani jako „mamy też…”, ani jako dodatek); mówisz o nim wyłącznie wtedy, gdy klient sam o niego pyta albo jego potrzeba wprost do niego prowadzi.";
+  return "";
 }
 
 function buildSalesPrompt(
@@ -429,13 +444,15 @@ function buildSalesPrompt(
     );
   }
   lines.push(
-    `ŹRÓDŁO PRAWDY: fakty o firmie i produktach bierzesz WYŁĄCZNIE z poniższej bazy. Niczego nie zmyślasz — brakującą informację pomijasz albo proponujesz kontakt.`,
+    `ŹRÓDŁO PRAWDY: fakty o firmie i produktach bierzesz WYŁĄCZNIE z poniższej bazy. Niczego nie zmyślasz i niczego nie dopowiadasz (kto prowadzi, gdzie, kiedy, za ile, dla ilu osób — tylko tak, jak stoi w bazie); daty i terminy wyłącznie z bazy. Brakującą informację pomijasz albo proponujesz kontakt.`,
   );
   if (ctx.firmText) lines.push(`\n=== FIRMA ===\n${ctx.firmText}`);
   if (ctx.products.length) {
     lines.push(`\n=== PRODUKTY DO SPRZEDANIA ===`);
     for (const p of ctx.products) {
       const parts = [`• ${p.name}: ${p.description}`];
+      const role = offerModeLine(String((p as Record<string, unknown>).offer_mode ?? ""));
+      if (role) parts.push(role);
       const notes = String((p as Record<string, unknown>).manual_notes ?? "");
       if (notes) parts.push(`  Dodatkowe informacje od właściciela: ${notes}`);
       const price = fmtPrice(p);
@@ -488,6 +505,7 @@ function buildSalesPrompt(
       );
     }
   }
+  lines.push(`\n${todayLine()}`);
   if (ownerRules.length) {
     lines.push(`\n=== ZANIM WYŚLESZ WIADOMOŚĆ — SPRAWDŹ ===\n${ownerRules.map((r) => `- ${r}`).join("\n")}\nJeśli wiadomość łamie którykolwiek punkt — popraw ją przed wysłaniem.`);
   }
@@ -506,6 +524,8 @@ function parseEmailDraft(raw: string): { subject: string; body: string } {
 // mimo reguły, więc pilnuje kod: zamiana na przecinek, bez podwójnych znaków.
 function noDashes(t: string): string {
   return t
+    // zakres liczb/godzin („10:00–14:00", „3–5 osób") to nie pauza — zostaje łącznik, a nie przecinek
+    .replace(/(\d)\s*[—–]\s*(?=\d)/g, "$1-")
     .replace(/\s*[—–]\s*/g, ", ")
     .replace(/,\s*,/g, ",")
     .replace(/([.!?:]),\s/g, "$1 ")
@@ -555,7 +575,7 @@ function sseSalesChat(upstream: Response, meta?: UsageMeta, model = "") {
   const clean = (s: string) => {
     for (const m of MARKERS) s = s.replaceAll(m, "");
     // „TEMAT:" to znacznik służbowy formatu e-mail — w demo pokazujemy go jako zwykły temat
-    return s.replaceAll("**", "").replaceAll("__", "").replace(/\bTEMAT:/g, "Temat:").replace(/[—–]/g, ",");
+    return s.replaceAll("**", "").replaceAll("__", "").replace(/\bTEMAT:/g, "Temat:").replace(/(\d)\s*[—–]\s*(?=\d)/g, "$1-").replace(/[—–]/g, ",");
   };
   const stream = new ReadableStream({
     async start(controller) {

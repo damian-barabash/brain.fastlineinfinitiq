@@ -92,6 +92,12 @@ function leadRow(b: Record<string, unknown>) {
 }
 
 // "3 200,50" / "3200.50" / 3200 → 3200.50; puste/nieparsowalne → null
+// jak agenci proponują produkt: główna oferta / zwykły / tylko na wyraźne pytanie klienta (ta sama reguła w brain-chat, brain-sales, hand-api)
+function offerMode(v: unknown): string {
+  const m = String(v ?? "");
+  return m === "main" || m === "on_request" ? m : "normal";
+}
+
 function parsePrice(v: unknown): number | null {
   if (v === undefined || v === null || v === "") return null;
   const n = Number(String(v).replace(/\s+/g, "").replace(",", "."));
@@ -104,8 +110,17 @@ function stripHtml(html: string): string {
     oacute: "ó", Oacute: "Ó", eacute: "é", ndash: "–", mdash: "—",
     laquo: "«", raquo: "»", bdquo: "„", rdquo: "”", hellip: "…",
   };
+  // Wiedza = treść strony, nie jej menu. Wcześniej każdy wpis zaczynał się od „KUP SZKOLENIE › KUP PREZENT ›
+  // DLA FIRM OFERTA KALENDARZ…" (menu i wersja mobilna menu), co zjadało limity promptu i myliło model.
+  // Jest <main> → bierzemy tytuł + <main>; nie ma → wycinamy <nav> i <footer>.
+  const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "").trim();
+  const main = html.match(/<main[\s>][\s\S]*<\/main>/i)?.[0];
+  if (main && main.length > 400) html = `${title}. ${main}`;
+  else html = html.replace(/<nav[\s>][\s\S]*?<\/nav>/gi, " ").replace(/<footer[\s>][\s\S]*?<\/footer>/gi, " ");
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
@@ -138,9 +153,102 @@ async function fetchUrlText(url: string): Promise<string> {
 // albo pustką przy chwilowej awarii, czyli potrafiła SKASOWAĆ wiedzę doradcy. Teraz: status HTTP
 // musi być 2xx, treść nie może być podejrzanie krótka, a wynik zawiera różnicę (co doszło / co znikło).
 const KB_CRON_KEY = Deno.env.get("KB_CRON_KEY") ?? "";
-const KB_REFRESH_EVERY_H = 20; // cron chodzi raz dziennie rano — próg poniżej doby, żeby wczorajsze wpisy były „zaległe"
 
-async function fetchUrlChecked(url: string, attempt = 0): Promise<{ ok: boolean; text: string; status: number; error?: string }> {
+// Warszawska data „dziś" (YYYY-MM-DD) — do odsiewania minionych terminów i do reguły „sprawdzone dziś"
+function warsawDay(d = new Date()): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+}
+
+function warsawHour(d = new Date()): number {
+  return Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Warsaw", hour: "2-digit", hourCycle: "h23" }).format(d));
+}
+// początek dzisiejszej doby w Warszawie, jako znacznik UTC
+function warsawMidnightIso(): string {
+  const utcMidnight = new Date(`${warsawDay()}T00:00:00Z`);
+  return new Date(utcMidnight.getTime() - warsawHour(utcMidnight) * 3600_000).toISOString();
+}
+// produkty ze źródłami, których opis nie nadąża za źródłami
+async function staleProductDescriptions(): Promise<string[]> {
+  const [{ data: prods }, { data: srcs }] = await Promise.all([
+    db.from("brain_products").select("id, desc_synced_at"),
+    db.from("brain_kb_items").select("product_id, changed_at, created_at").not("product_id", "is", null),
+  ]);
+  const last = new Map<string, string>();
+  for (const r of srcs ?? []) {
+    const t = String(r.changed_at ?? r.created_at ?? "");
+    if (t > (last.get(r.product_id) ?? "")) last.set(r.product_id, t);
+  }
+  return (prods ?? []).filter((p) => last.has(p.id) && (!p.desc_synced_at || String(p.desc_synced_at) < (last.get(p.id) ?? ""))).map((p) => p.id);
+}
+
+// JSON (np. REST bazy strony klienta: terminy, sezony, wyjazdy) → linie „klucz: wartość" czytelne dla modelu.
+// Pomijamy techniczne pola i wersje angielskie; wiersze z datą w przeszłości wypadają, reszta sortowana po dacie.
+const JSON_HEAD = "Dane na żywo ze źródła";
+const JSON_SKIP = /^(id|uuid|sort|order|visible|hidden|created_at|updated_at|photo|photos|image|images|img|color|icon|signup_url|slug|.*_en)$/i;
+const JSON_DATE = /^(date|date_to|date_end|end_date|date_from|start_date|starts_at|ends_at|day_date)$/i;
+function jsonToKb(raw: string): string | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const obj = data as Record<string, unknown>;
+  const rows = (Array.isArray(data) ? data : Array.isArray(obj?.items) ? obj.items : Array.isArray(obj?.data) ? obj.data : [data]) as Record<string, unknown>[];
+  const today = warsawDay();
+  const lastDate = (r: Record<string, unknown>) => {
+    const ds = Object.entries(r).filter(([k, v]) => JSON_DATE.test(k) && typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v)).map(([, v]) => String(v).slice(0, 10));
+    return ds.sort().pop() ?? "";
+  };
+  const firstDate = (r: Record<string, unknown>) => {
+    const ds = Object.entries(r).filter(([k, v]) => JSON_DATE.test(k) && typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v)).map(([, v]) => String(v).slice(0, 10));
+    return ds.sort()[0] ?? "";
+  };
+  const live = rows.filter((r) => r && typeof r === "object" && (!lastDate(r) || lastDate(r) >= today))
+    .sort((a, b) => firstDate(a).localeCompare(firstDate(b)));
+  // etykiety po polsku i jednoznaczne — model czytał „capacity: 8" jako „zostało 8 wolnych miejsc"
+  const LABEL: Record<string, string> = {
+    date: "data", date_from: "od", date_to: "do", start_date: "od", end_date: "do", starts_at: "początek", ends_at: "koniec",
+    time: "godziny", title: "nazwa", label: "nazwa", name: "nazwa", type: "rodzaj", location: "miejsce", track: "tor",
+    address: "adres", capacity: "wielkość grupy (miejsc łącznie; ile jest jeszcze wolnych, nie wiemy)", price: "cena",
+    currency: "waluta", description: "opis", note: "uwagi", includes: "w cenie",
+  };
+  const fmtDate = (v: string) => {
+    const d = new Date(`${v.slice(0, 10)}T12:00:00Z`);
+    return Number.isNaN(d.getTime()) ? v
+      : new Intl.DateTimeFormat("pl-PL", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(d);
+  };
+  const lines = live.map((r) =>
+    "- " + Object.entries(r)
+      .filter(([k, v]) => !JSON_SKIP.test(k) && v !== null && v !== "" && typeof v !== "object")
+      .map(([k, v]) => {
+        const key = k.replace(/_pl$/, "");
+        const val = JSON_DATE.test(k) && typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) ? fmtDate(v) : String(v).replace(/\s+/g, " ").slice(0, 400);
+        return `${LABEL[key] ?? key}: ${val}`;
+      })
+      .join("; ")
+  );
+  // grupy po miesiącach z licznikiem („LISTOPAD 2026, 2 pozycje") — bez tego model przy pytaniu
+  // „co w listopadzie?" wyłapywał jeden termin z długiej listy i mówił „mamy jeden termin"
+  const out: string[] = [];
+  let month = "";
+  live.forEach((r, i) => {
+    if (lines[i].length <= 2) return;
+    const m = firstDate(r).slice(0, 7);
+    if (m && m !== month) {
+      month = m;
+      const n = live.filter((x, j) => firstDate(x).slice(0, 7) === m && lines[j].length > 2).length;
+      const name = new Intl.DateTimeFormat("pl-PL", { timeZone: "UTC", month: "long", year: "numeric" }).format(new Date(`${m}-15T12:00:00Z`));
+      out.push(`\n${name.toUpperCase()}: ${n} ${n === 1 ? "pozycja" : n < 5 ? "pozycje" : "pozycji"}`);
+    }
+    out.push(lines[i]);
+  });
+  // bez godziny w nagłówku — inaczej każde sprawdzenie byłoby „zmianą treści"
+  const head = `${JSON_HEAD} (odświeżane co godzinę). Lista zawiera WSZYSTKIE nadchodzące pozycje w kolejności dat, pogrupowane po miesiącach, pierwsza = najbliższa. Pozycje z datą w przeszłości są pominięte.`;
+  return (out.length ? `${head}\n${out.join("\n")}` : `${head}\nBrak nadchodzących pozycji.`).slice(0, 20000);
+}
+
+async function fetchUrlChecked(url: string, attempt = 0): Promise<{ ok: boolean; text: string; status: number; error?: string; json?: boolean }> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 15000);
   try {
@@ -154,6 +262,12 @@ async function fetchUrlChecked(url: string, attempt = 0): Promise<{ ok: boolean;
     });
     const html = await r.text();
     if (!r.ok) return { ok: false, text: "", status: r.status, error: `strona odpowiedziała kodem ${r.status}` };
+    // źródło danych JSON (np. kalendarz terminów z bazy strony klienta) → czytelne linie dla modelu
+    const json = /json/i.test(r.headers.get("content-type") ?? "") || /^\s*[[{]/.test(html);
+    if (json) {
+      const t = jsonToKb(html);
+      return t === null ? { ok: false, text: "", status: r.status, error: "źródło nie oddało poprawnego JSON" } : { ok: true, text: t, status: r.status, json: true };
+    }
     return { ok: true, text: stripHtml(html).slice(0, 20000), status: r.status };
   } catch (e) {
     const raw = String(e);
@@ -216,7 +330,8 @@ async function refreshKbItem(it: { id: string; url: string; content: string | nu
   const f = await fetchUrlChecked(it.url);
   let error = f.ok ? "" : (f.error ?? "błąd pobierania");
   // strona „działa", ale oddała prawie nic (blokada bota, pusta aplikacja JS, awaria) — nie kasujemy wiedzy
-  if (!error && (f.text.length < 80 || (before.length > 800 && f.text.length < before.length * 0.2))) {
+  // (nie dotyczy źródeł JSON: kalendarz naturalnie się kurczy, gdy terminy mijają)
+  if (!error && !f.json && (f.text.length < 80 || (before.length > 800 && f.text.length < before.length * 0.2))) {
     error = `strona oddała tylko ${f.text.length} znaków tekstu (było ${before.length}) — zostawiam poprzednią treść`;
   }
   if (error) {
@@ -856,10 +971,21 @@ Deno.serve(async (req) => {
     // ── cron: codzienne odświeżanie stron WWW w bazie wiedzy (pg_cron co godzinę bierze zaległe) ──
     if (action === "kb.refreshDue") {
       if (!KB_CRON_KEY || req.headers.get("x-kb-key") !== KB_CRON_KEY) return J({ error: "forbidden" }, 403);
-      const due = new Date(Date.now() - KB_REFRESH_EVERY_H * 3600_000).toISOString();
-      const { data: items } = await db.from("brain_kb_items").select("id, url, content, product_id").eq("type", "url").neq("url", "")
-        .or(`checked_at.is.null,checked_at.lt.${due}`).order("checked_at", { ascending: true, nullsFirst: true }).limit(12);
-      const list = (items ?? []) as { id: string; url: string; content: string | null; product_id: string | null }[];
+      // 2026-09-25: próg „starsze niż 20 h" przepuszczał strony dodane wczoraj w południe (o 7:00 miały 19 h)
+      // — i czekały kolejną dobę. Teraz: strona WWW = sprawdzona raz w każdym dniu kalendarzowym (od 5:00
+      // czasu polskiego), źródło JSON (kalendarz terminów) = co godzinę. Cron chodzi co godzinę.
+      const midnight = warsawMidnightIso();
+      const hourAgo = new Date(Date.now() - 50 * 60_000).toISOString();
+      const sel = "id, url, content, product_id";
+      const [{ data: pages }, { data: feeds }] = await Promise.all([
+        warsawHour() >= 5
+          ? db.from("brain_kb_items").select(sel).eq("type", "url").neq("url", "").not("content", "like", `${JSON_HEAD}%`)
+            .or(`checked_at.is.null,checked_at.lt.${midnight}`).order("checked_at", { ascending: true, nullsFirst: true }).limit(24)
+          : Promise.resolve({ data: [] }),
+        db.from("brain_kb_items").select(sel).eq("type", "url").neq("url", "").like("content", `${JSON_HEAD}%`)
+          .lt("checked_at", hourAgo).limit(24),
+      ]);
+      const list = [...(feeds ?? []), ...(pages ?? [])] as { id: string; url: string; content: string | null; product_id: string | null }[];
       const out = { checked: 0, changed: 0, failed: 0, descriptions: 0 };
       const touched = new Map<string, string[]>();
       for (let i = 0; i < list.length; i += 4) {
@@ -876,7 +1002,10 @@ Deno.serve(async (req) => {
         });
       }
       // strona produktu się zmieniła → opis produktu idzie za nią (po kolei: bramka modelu ma limit równoległych wywołań)
-      for (const [pid, added] of [...touched.entries()].slice(0, 4)) {
+      // + produkty, których opis nigdy nie był zsynchronizowany albo jest starszy od ostatniej zmiany źródła
+      //   (w FRA opis Heels od 18.09 podawał stary termin, bo nikt nie nacisnął ↻)
+      for (const pid of await staleProductDescriptions()) if (!touched.has(pid)) touched.set(pid, []);
+      for (const [pid, added] of [...touched.entries()].slice(0, 6)) {
         const d = await syncProductDescription(pid, true, added).catch(() => null);
         if (d?.changed) out.descriptions++;
       }
@@ -1399,6 +1528,7 @@ Deno.serve(async (req) => {
             name: String(body.name || "").trim(),
             description: String(body.description || ""),
             manual_notes: String(body.manual_notes || "").slice(0, 4000),
+            offer_mode: offerMode(body.offer_mode),
             buy_url: String(body.buy_url || ""),
             sales_name: String(body.sales_name || ""),
             sales_phone: String(body.sales_phone || ""),
@@ -1420,6 +1550,7 @@ Deno.serve(async (req) => {
           if (body[k] !== undefined) patch[k] = body[k];
         }
         if (body.manual_notes !== undefined) patch.manual_notes = String(body.manual_notes || "").slice(0, 4000);
+        if (body.offer_mode !== undefined) patch.offer_mode = offerMode(body.offer_mode);
         // opis jest zablokowany, gdy produkt ma źródła (powstaje z nich automatycznie) — ręcznie tylko bez źródeł
         if (body.description !== undefined) {
           const { count } = await db.from("brain_kb_items").select("id", { count: "exact", head: true }).eq("product_id", body.id as string);

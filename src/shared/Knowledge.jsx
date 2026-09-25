@@ -464,6 +464,8 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
         ) : (
           <span className="badge warn">Brak ceny</span>
         )}
+        {p.offer_mode === 'main' && <span className="badge acid">Główna oferta</span>}
+        {p.offer_mode === 'on_request' && <span className="badge">Tylko na pytanie klienta</span>}
         {p.buy_url ? <span className="badge acid">Link do zakupu</span> : <span className="badge danger">Brak linku do zakupu</span>}
         {p.sales_name || p.sales_phone ? (
           <span className="badge">Sprzedaż: {[p.sales_name, p.sales_phone].filter(Boolean).join(' • ')}</span>
@@ -578,6 +580,13 @@ function ItemModal({ projId, productId, onClose, onDone }) {
   )
 }
 
+// Ta sama reguła obowiązuje doradcę, sprzedawcę i Łowcę (brain_products.offer_mode)
+const OFFER_MODES = {
+  main: { label: 'Główna oferta — proponują w pierwszej kolejności', hint: 'Gdy klient nie wie, czego szuka, agenci zaczynają od tego produktu.' },
+  normal: { label: 'Zwykły — proponują, gdy pasuje do rozmowy', hint: 'Agenci dobierają go do potrzeb klienta jak każdy inny produkt.' },
+  on_request: { label: 'Tylko na pytanie klienta — sami o nim nie mówią', hint: 'Agenci nie wspominają o nim z własnej inicjatywy (ani w powitaniu, ani jako „mamy też…”). Mówią o nim, gdy klient sam zapyta albo jego potrzeba wprost do niego prowadzi.' },
+}
+
 function ProductModal({ projId, product, hasSources, onClose, onDone }) {
   const [f, setF] = useState({
     name: product?.name || '',
@@ -589,6 +598,7 @@ function ProductModal({ projId, product, hasSources, onClose, onDone }) {
     price: product?.price ?? '',
     price_mode: product?.price_mode || 'netto',
     price_currency: product?.price_currency || 'PLN',
+    offer_mode: product?.offer_mode || 'normal',
   })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -632,6 +642,15 @@ function ProductModal({ projId, product, hasSources, onClose, onDone }) {
         <label className="f">
           <span className="mono">Opis ręczny — dodatkowe informacje (opcjonalnie)</span>
           <textarea value={f.manual_notes} onChange={set('manual_notes')} placeholder="Wszystko, czego nie ma na stronie ani w dokumentach, a doradca ma wiedzieć." />
+        </label>
+        <label className="f">
+          <span className="mono">Jak agenci proponują ten produkt</span>
+          <select value={f.offer_mode} onChange={set('offer_mode')}>
+            {Object.entries(OFFER_MODES).map(([k, m]) => (
+              <option key={k} value={k}>{m.label}</option>
+            ))}
+          </select>
+          <span className="hint">{OFFER_MODES[f.offer_mode]?.hint}</span>
         </label>
         <label className="f">
           <span className="mono">Link do zakupu</span>

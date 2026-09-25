@@ -397,6 +397,9 @@ const UNI_REPLY_DELAY_MS: [number, number] = [1500, 4000]; // „człowiek nie o
 type AccountRow = {
   id: string; project_id: string; provider: string; account_id: string; account_name: string;
   provider_user_id: string; status: string; connected_at: string;
+  // Instagram nadaje wiadomościom id konta z INNEJ przestrzeni niż id konta (konto 7578586039,
+  // nadawca własnych wiadomości 119702706090004) — takie id uczymy się i trzymamy tutaj
+  own_ids?: string[] | null;
 };
 
 async function unipileCfg() {
@@ -483,6 +486,8 @@ async function uniBudgetOk(acc: AccountRow, chatId: string): Promise<boolean> {
 async function replyUni(acc: AccountRow, chatId: string, text: string, count = false) {
   const [lo, hi] = UNI_REPLY_DELAY_MS;
   await new Promise((r) => setTimeout(r, lo + Math.random() * (hi - lo)));
+  // ślad PRZED wysyłką: webhook z naszą własną wiadomością potrafi przyjść, zanim Unipile odda message_id
+  await logEvent(acc.project_id, "uni_sending", { chat_id: chatId, t: sentKey(text) });
   try {
     const res = await uniSend(chatId, acc.account_id, acc.provider, text);
     await logUniSent(acc.project_id, chatId, String(res?.message_id ?? ""), text);
@@ -517,7 +522,7 @@ async function isOurOwnMessage(chatId: string, messageId: string, text: string):
   }
   // webhook potrafi wyprzedzić zapis śladu albo dostawca nadaje inne id — porównanie treści z ostatnich minut
   const since = new Date(Date.now() - 5 * 60_000).toISOString();
-  const { data } = await db.from("brain_events").select("data").eq("type", "uni_sent").eq("data->>chat_id", chatId).gte("created_at", since).limit(20);
+  const { data } = await db.from("brain_events").select("data").in("type", ["uni_sent", "uni_sending"]).eq("data->>chat_id", chatId).gte("created_at", since).limit(40);
   const k = sentKey(text);
   if (!k) return false;
   if ((data ?? []).some((r) => String((r.data as Record<string, unknown>)?.t ?? "") === k)) return true;
@@ -537,6 +542,10 @@ async function uniMuteUntil(chatId: string): Promise<string | null> {
 }
 
 async function handleHumanTakeover(acc: AccountRow, chatId: string, messageId: string, text: string, otherId: string) {
+  if (await isOurOwnMessage(chatId, messageId, text)) return;
+  // sprzedawca i Łowca zapisują ślad dopiero po odpowiedzi Unipile — dajemy im chwilę,
+  // zanim uznamy wiadomość za człowieka (fałszywe przejęcie = agent milczy 48 h)
+  await new Promise((r) => setTimeout(r, 5000));
   if (await isOurOwnMessage(chatId, messageId, text)) return;
   if (await uniMuteUntil(chatId)) return; // już wyciszone — nie mnożymy zdarzeń
   const until = new Date(Date.now() + HUMAN_MUTE_H * 3600_000).toISOString();
@@ -638,22 +647,49 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
     return;
   }
   const provider = acc.provider;
+  const text = String(body.message ?? "").trim();
+  const ownIds = () => [ownId, acc.provider_user_id, ...(acc.own_ids ?? [])];
+  const isMine = (id: string) => ownIds().some((o) => sameActor(id, o));
+
+  // ── czy to NASZA wiadomość? ────────────────────────────────────────────────────
+  // Własne wiadomości (agent przez API, człowiek z telefonu) też przychodzą jako message_received.
+  // 2026-09-25: na Instagramie id nadawcy własnych wiadomości ≠ id konta → agent brał własne odpowiedzi
+  // za klienta i odpowiadał sam sobie w kółko. Dlatego kilka niezależnych dowodów, nie jedno porównanie id.
+  let own = body.is_sender === true || body.is_sender === 1 || isMine(senderId);
+  let learn = false;
+  if (!own && (await isOurOwnMessage(chatId, messageId, text))) own = learn = true; // nasz ślad wysyłki
+  let chatOther = "";
+  if (!own) {
+    // rozmowa 1:1: drugą stroną jest attendee czatu; ktokolwiek inny pisze z naszego konta
+    chatOther = await uniChatOther(chatId);
+    if (chatOther && !sameActor(senderId, chatOther)) own = learn = true;
+  }
+  if (own && learn && senderId && !isMine(senderId)) await learnOwnId(acc, senderId);
+
   // grupy: doradca w grupie rodzinnej klienta to katastrofa — odpowiadamy tylko 1:1
   const attendees = (body.attendees ?? []) as Record<string, unknown>[];
   const others = attendees.filter((a) => {
     const id = String(a.attendee_provider_id ?? "");
-    return id && !sameActor(id, ownId) && !sameActor(id, acc.provider_user_id);
+    return id && !isMine(id);
   });
   if (body.is_group === true || others.length > 1) return;
-  const text = String(body.message ?? "").trim();
-  // własne wiadomości (z telefonu, z innego urządzenia, z API) też przychodzą jako message_received:
   // nasza wysyłka → cisza; wiadomość człowieka z tego konta → przejęcie rozmowy (agent milknie)
-  if (sameActor(senderId, ownId) || sameActor(senderId, acc.provider_user_id)) {
+  if (own) {
     if (await seenBefore(acc.project_id, `uni:${messageId || `${chatId}:${body.timestamp ?? ""}`}`)) return;
-    await handleHumanTakeover(acc, chatId, messageId, text, String(others[0]?.attendee_provider_id ?? ""));
+    const other = String(others[0]?.attendee_provider_id ?? "") || chatOther;
+    await handleHumanTakeover(acc, chatId, messageId, text, other);
     return;
   }
   if (await seenBefore(acc.project_id, `uni:${messageId || `${chatId}:${body.timestamp ?? ""}`}`)) return;
+
+  // reakcje („Liked a message"), zdarzenia systemowe — to nie pytanie klienta, nikt na nie nie odpowiada
+  if (body.is_event === true || body.is_event === 1 || REACTION_RE.test(text)) {
+    await logEvent(acc.project_id, "uni_skip", { provider, chat_id: chatId, reason: "reakcja/zdarzenie" });
+    return;
+  }
+  // bezpiecznik pętli (ostatnia linia obrony, niezależnie od rozpoznania nadawcy):
+  // echo naszej wiadomości albo seria naszych odpowiedzi w tym czacie = nie odpowiadamy
+  if (await uniEchoOrLoop(acc, chatId, text)) return;
 
   const hasAttachments = Array.isArray(body.attachments) && (body.attachments as unknown[]).length > 0;
   const channel = PROVIDER_CHANNEL[provider] ?? "unipile";
@@ -692,7 +728,8 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
   const ch = chRows?.[0];
   if (ch?.enabled) {
     if (!text) {
-      if (hasAttachments) await replyUni(acc, chatId, NO_TEXT_REPLY);
+      // „piszę tylko tekstem" najwyżej raz na dobę w czacie — nie odpowiadamy tym samym na każde zdjęcie
+      if (hasAttachments && !(await sentRecently(chatId, NO_TEXT_REPLY, 24))) await replyUni(acc, chatId, NO_TEXT_REPLY);
       return;
     }
     if (!(await uniBudgetOk(acc, chatId))) return;
@@ -705,11 +742,79 @@ async function handleUnipileMessage(body: Record<string, unknown>) {
   // 4) doradca wyłączony → Sprzedawca może przyjąć nowego (decyduje jego konfiguracja).
   //    LinkedIn wyjątkowo NIE: to prywatna skrzynka właściciela — odpowiadamy tam tylko
   //    leadom Łowcy/Sprzedawcy albo gdy właściciel świadomie włączył doradcę na tym koncie.
-  if (text && provider !== "LINKEDIN") {
+  //    I tylko wtedy, gdy sprzedawca w tym projekcie naprawdę pracuje (autopilot włączony) — wyłączenie
+  //    doradcy NIE może po cichu oddać skrzynki sprzedawcy, którego właściciel nie uruchomił (2026-09-25).
+  const reason = !text ? "bez tekstu" : provider === "LINKEDIN" ? "linkedin bez doradcy" : !(await salesTakesNew(acc.project_id))
+    ? "doradca wyłączony, sprzedawca bez autopilota" : "";
+  if (!reason) {
     await uniMarkRead(chatId, provider);
     await forwardSales(salesPayload);
   }
-  else await logEvent(acc.project_id, "uni_no_route", { provider, chat_id: chatId, reason: provider === "LINKEDIN" ? "linkedin bez doradcy" : "bez tekstu" });
+  else await logEvent(acc.project_id, "uni_no_route", { provider, chat_id: chatId, reason });
+}
+
+const REACTION_RE = /^(liked a message|reacted .{1,12} to your message|.{0,40} reacted to your message|polubił[ao]? (twoją )?wiadomość)$/i;
+const LOOP_WINDOW_MIN = 3;
+const LOOP_MAX_SENT = 5;
+
+// druga strona czatu 1:1 (attendee_provider_id z Unipile), z krótkim cache w izolacie
+const chatOtherCache = new Map<string, { v: string; at: number }>();
+async function uniChatOther(chatId: string): Promise<string> {
+  const hit = chatOtherCache.get(chatId);
+  if (hit && Date.now() - hit.at < 30 * 60_000) return hit.v;
+  try {
+    const c = await uniFetch(`/chats/${encodeURIComponent(chatId)}`, {}, 8_000);
+    const group = c.type === 1 || c.type === 2 || c.is_group === true;
+    const v = group ? "" : String(c.attendee_provider_id ?? c.provider_id ?? "");
+    chatOtherCache.set(chatId, { v, at: Date.now() });
+    return v;
+  } catch (e) {
+    console.error("unipile chat lookup", String(e).slice(0, 160));
+    return "";
+  }
+}
+
+async function learnOwnId(acc: AccountRow, id: string) {
+  const ids = [...new Set([...(acc.own_ids ?? []), id])].slice(-10);
+  acc.own_ids = ids;
+  const { error } = await db.from("fiq_project_accounts").update({ own_ids: ids }).eq("id", acc.id);
+  if (error) console.error("learnOwnId", error.message);
+  else console.log("unipile: nauczone własne id konta", acc.provider, id);
+}
+
+async function sentRecently(chatId: string, text: string, hours: number): Promise<boolean> {
+  const since = new Date(Date.now() - hours * 3600_000).toISOString();
+  const { count } = await db.from("brain_events").select("id", { count: "exact", head: true })
+    .eq("type", "uni_sent").eq("data->>chat_id", chatId).eq("data->>t", sentKey(text)).gte("created_at", since);
+  return (count ?? 0) > 0;
+}
+
+async function uniEchoOrLoop(acc: AccountRow, chatId: string, text: string): Promise<boolean> {
+  const k = sentKey(text);
+  if (k && k.length >= 12) {
+    const dayAgo = new Date(Date.now() - 86400_000).toISOString();
+    const { count } = await db.from("brain_events").select("id", { count: "exact", head: true })
+      .in("type", ["uni_sent", "uni_sending"]).eq("data->>chat_id", chatId).eq("data->>t", k).gte("created_at", dayAgo);
+    if ((count ?? 0) > 0) {
+      await logEvent(acc.project_id, "uni_loop_guard", { chat_id: chatId, provider: acc.provider, reason: "echo naszej wiadomości" });
+      return true;
+    }
+  }
+  const since = new Date(Date.now() - LOOP_WINDOW_MIN * 60_000).toISOString();
+  const { count: sent } = await db.from("brain_events").select("id", { count: "exact", head: true })
+    .eq("type", "uni_sent").eq("data->>chat_id", chatId).gte("created_at", since);
+  if ((sent ?? 0) >= LOOP_MAX_SENT) {
+    await logEvent(acc.project_id, "uni_loop_guard", { chat_id: chatId, provider: acc.provider, reason: `${sent} naszych wiadomości w ${LOOP_WINDOW_MIN} min` });
+    return true;
+  }
+  return false;
+}
+
+// Sprzedawca zakłada leada z obcej wiadomości tylko wtedy, gdy w projekcie działa (autopilot) i nie wyłączył kanałów linkiem
+async function salesTakesNew(projectId: string): Promise<boolean> {
+  const { data } = await db.from("brain_sales").select("config").eq("project_id", projectId).maybeSingle();
+  const cfg = (data?.config ?? {}) as { enabled?: boolean; channels?: { unipile?: boolean } };
+  return cfg.enabled === true && cfg.channels?.unipile !== false;
 }
 
 // Stan konta (CREDENTIALS = klient wylogował / zmienił hasło, DELETED = usunięte u Unipile).

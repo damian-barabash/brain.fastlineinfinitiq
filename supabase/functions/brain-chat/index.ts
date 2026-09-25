@@ -21,7 +21,20 @@ const J = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 
 const HISTORY_LIMIT = 12;
-const FIRM_KB_CAP = 2000; // znaków wiedzy ogólnej w prompt'cie (krótszy prompt = szybszy pierwszy token)
+const FIRM_KB_CAP = 2000; // znaków wiedzy ogólnej w prompt'cie — tylko dla słabego modelu (qwen 9B)
+// Silny model (DeepSeek, 1M kontekstu, cache prefiksu) dostaje CAŁĄ bazę wiedzy projektu: wszystkie produkty
+// w pełnej wersji, w stałej kolejności (ta sama kolejność = trafienie w cache = ~50× taniej). Te same limity
+// mają brain-sales i hand-api — agent ma wiedzieć wszystko, co jest w bazie, a nie 700 znaków o 2 produktach.
+const FIRM_KB_CAP_STRONG = 30000;
+const PRODUCT_KB_CAP_STRONG = 8000;
+const isWeakModel = (model: string) => /qwen|llama|mistral|gemma|phi|:\d+b/i.test(model);
+
+// „Dzisiaj" dla modelu — bez tego nie wie, które terminy z kalendarza już minęły
+function todayLine(): string {
+  const now = new Date();
+  const f = new Intl.DateTimeFormat("pl-PL", { timeZone: "Europe/Warsaw", weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(now);
+  return `DZISIAJ jest ${f} (czas polski). Terminy i daty wcześniejsze niż dziś już minęły — nie proponujesz ich. Gdy klient pyta o termin, podajesz najbliższe PRZYSZŁE terminy z bazy wiedzy (kalendarz), z datą, godziną i miejscem. Przed odpowiedzią o terminach przejrzyj CAŁĄ listę z kalendarza i wymień KAŻDY termin, który pasuje do pytania (np. wszystkie w danym miesiącu), żadnego nie pomijając; liczba miejsc w kalendarzu to wielkość grupy, a nie wolne miejsca.`;
+}
 const PRODUCT_FULL = 2; // ile produktów w pełnej wersji
 const LESSON_LIMIT = 15; // ile zatwierdzonych wskazówek trenera wchodzi do promptu
 const LESSON_CHARS = 1800;
@@ -73,6 +86,13 @@ function goneParts(removed: string[], currentDescription: string): string[] {
   return out.slice(0, 10);
 }
 
+// Jak agent proponuje produkt (brain_products.offer_mode) — TA SAMA reguła w brain-chat, brain-sales i hand-api
+function offerModeLine(mode?: string | null): string {
+  if (mode === "main") return "  Rola w ofercie: GŁÓWNA OFERTA. To proponujesz w pierwszej kolejności, gdy klient jeszcze nie wie, czego szuka.";
+  if (mode === "on_request") return "  Rola w ofercie: TYLKO NA PYTANIE. Nie wspominasz o nim sam z siebie (ani w powitaniu, ani jako „mamy też…”, ani jako dodatek); mówisz o nim wyłącznie wtedy, gdy klient sam o niego pyta albo jego potrzeba wprost do niego prowadzi.";
+  return "";
+}
+
 function buildSystemPrompt(
   projectName: string,
   adv: Advisor,
@@ -88,17 +108,21 @@ function buildSystemPrompt(
     price_mode: string;
     price_currency: string;
     kb: string;
+    offer_mode?: string | null;
   }[],
   lessons: Lesson[],
   userText: string,
   firstTurn: boolean,
   changes?: { removed: string[]; added: string[] },
+  allFull = false,
 ): string {
-  const scored = products
+  // słaby model: 2 najbardziej pasujące produkty w pełni, reszta z nazwy; silny: wszystko, stała kolejność
+  const scored = allFull ? products.map((p) => ({ p, s: 0 })) : products
     .map((p) => ({ p, s: relevanceScore(userText, p.name) }))
     .sort((a, b) => b.s - a.s);
-  const full = scored.slice(0, PRODUCT_FULL).map((x) => x.p);
-  const rest = scored.slice(PRODUCT_FULL).map((x) => {
+  const nFull = allFull ? scored.length : PRODUCT_FULL;
+  const full = scored.slice(0, nFull).map((x) => x.p);
+  const rest = scored.slice(nFull).map((x) => {
     const price = fmtPrice(x.p);
     return price ? `${x.p.name} (${price})` : x.p.name;
   });
@@ -154,13 +178,15 @@ function buildSystemPrompt(
       `- Gdy klient pyta o cenę, PODAJESZ ją z bazy wiedzy. Jeśli nie wiadomo, o który produkt chodzi — podajesz widełki (od najtańszego do najdroższego) i dopiero potem dopytujesz. Nigdy nie odpowiadasz samym „to zależy".`,
   );
   lines.push(
-    `ŹRÓDŁO PRAWDY: odpowiadasz WYŁĄCZNIE na podstawie poniższej bazy wiedzy. Jeśli czegoś w niej nie ma — mówisz wprost, że nie masz tej informacji, i proponujesz kontakt z działem sprzedaży. Niczego nie zmyślasz.`,
+    `ŹRÓDŁO PRAWDY: odpowiadasz WYŁĄCZNIE na podstawie poniższej bazy wiedzy. Jeśli czegoś w niej nie ma — mówisz wprost, że nie masz tej informacji, i proponujesz kontakt z działem sprzedaży. Niczego nie zmyślasz i niczego nie dopowiadasz: kto prowadzi zajęcia, gdzie, kiedy, za ile, dla ilu osób — tylko dokładnie tak, jak stoi w bazie (np. jeśli baza mówi „instruktorzy-zawodnicy pod okiem Mariusza Miękosia", nie zamieniasz tego na „prowadzi zawodniczka"). Daty i terminy podajesz wyłącznie z bazy.`,
   );
   if (firmText) lines.push(`\n=== WIEDZA O FIRMIE ===\n${firmText}`);
   if (full.length) {
     lines.push(`\n=== PRODUKTY ===`);
     for (const p of full) {
       const parts = [`• ${p.name}: ${p.description}`];
+      const role = offerModeLine(p.offer_mode);
+      if (role) parts.push(role);
       if (p.manual_notes) parts.push(`  Dodatkowe informacje od właściciela: ${p.manual_notes}`);
       const price = fmtPrice(p);
       if (price) parts.push(`  Cena: ${price}`);
@@ -216,6 +242,7 @@ function buildSystemPrompt(
         `Nie udawaj, że tego nigdy nie było, i nie potwierdzaj nieaktualnych rzeczy.`,
     );
   }
+  lines.push(`\n${todayLine()}`);
   if (clientRules.length) {
     lines.push(
       `\n=== ZANIM WYŚLESZ ODPOWIEDŹ — SPRAWDŹ ===\n` +
@@ -250,7 +277,7 @@ async function loadContextFresh(publicKey: string) {
   const project = ch.brain_projects as unknown as { id: string; name: string };
   const [{ data: adv }, { data: products }, { data: items }, { data: settings }, { data: fb }] = await Promise.all([
     db.from("brain_advisor").select("config").eq("project_id", ch.project_id).maybeSingle(),
-    db.from("brain_products").select("id, name, description, manual_notes, buy_url, sales_name, sales_phone, price, price_mode, price_currency, desc_last_change").eq("project_id", ch.project_id).order("sort"),
+    db.from("brain_products").select("id, name, description, manual_notes, buy_url, sales_name, sales_phone, price, price_mode, price_currency, desc_last_change, offer_mode").eq("project_id", ch.project_id).order("sort"),
     db.from("brain_kb_items").select("product_id, content").eq("project_id", ch.project_id).order("sort"),
     db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle(),
     db
@@ -262,18 +289,19 @@ async function loadContextFresh(publicKey: string) {
       .order("created_at", { ascending: false })
       .limit(LESSON_LIMIT),
   ]);
+  const strong = !isWeakModel(String((settings?.value as Record<string, unknown> | undefined)?.model ?? "qwen3.5:9b"));
   const firmText = (items ?? [])
     .filter((i) => !i.product_id && i.content)
     .map((i) => i.content)
     .join("\n")
-    .slice(0, FIRM_KB_CAP);
+    .slice(0, strong ? FIRM_KB_CAP_STRONG : FIRM_KB_CAP);
   const prods = (products ?? []).map((p) => ({
     ...p,
     kb: (items ?? [])
       .filter((i) => i.product_id === p.id && i.content)
       .map((i) => i.content)
       .join("\n")
-      .slice(0, 700),
+      .slice(0, strong ? PRODUCT_KB_CAP_STRONG : 700),
   }));
   return {
     channel: ch,
@@ -283,6 +311,7 @@ async function loadContextFresh(publicKey: string) {
     products: prods,
     lessons: (fb ?? []) as Lesson[],
     ai: settings?.value ?? {},
+    strong,
   };
 }
 
@@ -290,6 +319,8 @@ async function loadContextFresh(publicKey: string) {
 // mimo reguły, więc pilnuje kod: zamiana na przecinek, bez podwójnych znaków.
 function noDashes(t: string): string {
   return t
+    // zakres liczb/godzin („10:00–14:00", „3–5 osób") to nie pauza — zostaje łącznik, a nie przecinek
+    .replace(/(\d)\s*[—–]\s*(?=\d)/g, "$1-")
     .replace(/\s*[—–]\s*/g, ", ")
     .replace(/,\s*,/g, ",")
     .replace(/([.!?:]),\s/g, "$1 ")
@@ -490,7 +521,7 @@ function sseFromUpstream(
               const jd = JSON.parse(payload);
               if (jd?.usage) usage = jd.usage as Usage;
               // pauzy w locie: model oddaje „—" jednym kawałkiem, więc zamiana per kawałek jest bezpieczna
-              const piece = String(jd?.choices?.[0]?.delta?.content ?? "").replace(/[—–]/g, ",");
+              const piece = String(jd?.choices?.[0]?.delta?.content ?? "").replace(/(\d)\s*[—–]\s*(?=\d)/g, "$1-").replace(/[—–]/g, ",");
               if (piece) {
                 full += piece;
                 // znacznik przekazania nie wycieka do klienta; markdown czyścimy w locie
@@ -630,6 +661,8 @@ Deno.serve(async (req) => {
       ctx.lessons,
       question + " " + note,
       false,
+      undefined,
+      ctx.strong,
     );
     const messages = [
       { role: "system", content: sys },
@@ -737,6 +770,7 @@ Deno.serve(async (req) => {
     message + " " + history.slice(-4).map((m) => m.content).join(" "),
     history.length === 0,
     hasChanges ? changes : undefined,
+    ctx.strong,
   );
   // Ostatnie słowo w prompcie działa na mały model najmocniej: przy zmianach w trakcie rozmowy krótka
   // notatka idzie też razem z wiadomością klienta (tylko do modelu — w bazie zostaje czysta wiadomość).

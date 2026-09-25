@@ -1230,10 +1230,15 @@ button.is-busy {
 .btn.is-busy::after,
 button.is-busy::after {
   content: '';
+  /* bez display: inline-block kółko w przycisku, który nie jest flexem (np. TAK/NIE),
+     jest pseudo-elementem inline — szerokość/wysokość znikają i zostaje sama „kreska" */
+  display: inline-block;
+  vertical-align: -2px;
+  box-sizing: border-box;
   width: 12px;
   height: 12px;
   flex-shrink: 0;
-  margin-left: 4px;
+  margin-left: 6px;
   border-radius: 50%;
   border: 2px solid currentColor;
   border-right-color: transparent;
