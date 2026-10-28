@@ -59,6 +59,12 @@ export const session = {
     localStorage.setItem(LS.token, token)
     localStorage.setItem(LS.user, JSON.stringify(user))
   },
+  // dopisanie pól do zapisanego użytkownika (np. must_change_password, onboarding)
+  patchUser(patch) {
+    const u = { ...(this.user || {}), ...patch }
+    localStorage.setItem(LS.user, JSON.stringify(u))
+    return u
+  },
   setWs(ws) {
     if (ws) localStorage.setItem(LS.ws, JSON.stringify(ws))
     else localStorage.removeItem(LS.ws)
@@ -162,6 +168,7 @@ const READ_ACTIONS = new Set([
   'hand.messages',
   'hand.stats',
   'hand.runs',
+  'account.get',
 ])
 
 // Odczyty są idempotentne, więc dostają limit czasu i jeden powtórny strzał —

@@ -41,13 +41,13 @@ export default function Knowledge() {
         </div>
       </div>
 
-      <div className="row" style={{ marginBottom: 12 }}>
-        <h2 style={{ fontSize: 16 }}>Dane firmy</h2>
-        <button className="btn sm right" onClick={() => setModal({ kind: 'item', productId: null })}>
+      <div className="sec-h">
+        Dane firmy · {firmItems.length}
+        <button className="btn sm right" data-tour="kb-add" onClick={() => setModal({ kind: 'item', productId: null })}>
           <IcPlus /> Dodaj wiedzę
         </button>
       </div>
-      <div className="grid g3">
+      <div className="kb-grid">
         {firmItems.map((it) => (
           <KbCard key={it.id} it={it} onChanged={load} />
         ))}
@@ -56,14 +56,13 @@ export default function Knowledge() {
         )}
       </div>
 
-      <div className="spacer" />
-      <div className="row" style={{ marginBottom: 12 }}>
-        <h2 style={{ fontSize: 16 }}>Produkty</h2>
+      <div className="sec-h" style={{ marginTop: 34 }}>
+        Produkty · {products.length}
         <button className="btn sm right" onClick={() => setModal({ kind: 'product' })}>
           <IcPlus /> Dodaj produkt
         </button>
       </div>
-      <div className="grid g2">
+      <div className="kb-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(420px, 100%), 1fr))' }}>
         {products.map((p) => (
           <ProductCard
             key={p.id}
@@ -130,27 +129,27 @@ function KbCard({ it, onChanged, compact }) {
   }
 
   return (
-    <div className="card" style={compact ? { padding: 12 } : undefined}>
-      <div className="row" style={{ marginBottom: 8 }}>
-        <span style={{ color: 'var(--acid)', width: 16, height: 16 }}>{TYPE_ICON[it.type]}</span>
-        <b style={{ fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || TYPE_LABEL[it.type]}</b>
-        <span className="right row" style={{ gap: 4 }}>
+    <div className="card kb-card" style={compact ? { padding: 12 } : undefined}>
+      <div className="kb-head">
+        <span className="kb-ic">{TYPE_ICON[it.type]}</span>
+        <b className="kb-title clamp2" title={it.title || TYPE_LABEL[it.type]}>{it.title || TYPE_LABEL[it.type]}</b>
+        <span className="btn-group">
           {it.type === 'url' && (
-            <button className="btn sm" onClick={refresh} disabled={busy} title="Sprawdź stronę teraz i pokaż, co się zmieniło">
+            <button className="btn sm icon" onClick={refresh} disabled={busy} title="Sprawdź stronę teraz i pokaż, co się zmieniło">
               <IcRefresh />
             </button>
           )}
           {it.type === 'file' && it.file_path && (
-            <button className="btn sm" onClick={openFile} title="Otwórz plik">
+            <button className="btn sm icon" onClick={openFile} title="Otwórz plik">
               <IcFile />
             </button>
           )}
           {it.type !== 'file' && (
-            <button className="btn sm" onClick={() => setEdit(!edit)} title="Edytuj">
+            <button className="btn sm icon" onClick={() => setEdit(!edit)} title="Edytuj">
               <IcEdit />
             </button>
           )}
-          <button className="btn sm danger" onClick={del} title="Usuń">
+          <button className="btn sm icon danger" onClick={del} title="Usuń">
             <IcTrash />
           </button>
         </span>
@@ -179,22 +178,13 @@ function KbCard({ it, onChanged, compact }) {
       ) : (
         <>
           {it.url && (
-            <a href={it.url} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 10.5, display: 'block', marginBottom: 6 }}>
-              {it.url}
+            <a href={it.url} target="_blank" rel="noreferrer" className="kb-url" title={it.url}>
+              {shortUrl(it.url)}
             </a>
           )}
-          <p className="muted" style={{ fontSize: 12.5, maxHeight: 60, overflow: 'hidden' }}>
-            {it.content ? it.content.slice(0, 180) + (it.content.length > 180 ? '…' : '') : 'Plik binarny — treść nie trafia do promptu.'}
+          <p className={`kb-text ${compact ? 'clamp2' : 'clamp3'}`}>
+            {it.content ? it.content.slice(0, 400) : 'Plik binarny — treść nie trafia do promptu.'}
           </p>
-          <div className="mono" style={{ marginTop: 8, fontSize: 11 }}>
-            {TYPE_LABEL[it.type]} • {it.chars.toLocaleString('pl-PL')} znaków
-            {it.type === 'url' && (
-              <>
-                {' • '}
-                {it.checked_at ? `sprawdzono ${fmtWhen(it.checked_at)}` : 'jeszcze nie sprawdzano'} • auto co 24 h
-              </>
-            )}
-          </div>
           {it.type === 'url' && it.fetch_error && (
             <div className="kb-flag warn" title="Poprzednia treść została w bazie wiedzy — doradca nadal z niej korzysta">
               Ostatnie sprawdzenie nieudane: {it.fetch_error}
@@ -205,6 +195,14 @@ function KbCard({ it, onChanged, compact }) {
               Treść zmieniła się {fmtWhen(it.changed_at)}{it.last_change.auto ? ' (automatycznie)' : ''} — zobacz, co
             </button>
           )}
+          <div className="kb-meta">
+            <span><b>{TYPE_LABEL[it.type]}</b> · {it.chars.toLocaleString('pl-PL')} znaków</span>
+            {it.type === 'url' && (
+              <span title="Strona sprawdzana automatycznie raz na dobę">
+                {it.checked_at ? `Sprawdzono ${fmtWhen(it.checked_at)}` : 'Jeszcze nie sprawdzano'}
+              </span>
+            )}
+          </div>
         </>
       )}
       {check && (
@@ -220,6 +218,17 @@ function KbCard({ it, onChanged, compact }) {
       )}
     </div>
   )
+}
+
+// adres do pokazania: domena + ścieżka, bez protokołu i zapytania (pełny w title)
+function shortUrl(u) {
+  try {
+    const x = new URL(u)
+    const path = x.pathname === '/' ? '' : x.pathname.replace(/\/$/, '')
+    return x.hostname.replace(/^www\./, '') + path + (x.search ? '?…' : '')
+  } catch {
+    return u
+  }
 }
 
 function fmtWhen(iso) {
@@ -238,7 +247,7 @@ function RefreshModal({ url, check, onClose }) {
     <div className="modal-bg" onClick={(e) => !loading && e.target === e.currentTarget && onClose()}>
       <div className="modal kb-check">
         <h2>{loading ? 'Sprawdzam stronę…' : check.state === 'history' ? 'Ostatnia zmiana treści' : 'Wynik sprawdzenia'}</h2>
-        <div className="mono kb-check-url">{url}</div>
+        <div className="kb-url kb-check-url" title={url}>{shortUrl(url)}</div>
         {loading && (
           <div className="kb-check-wait">
             <span className="kb-spin" />
@@ -410,40 +419,50 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
     onChanged()
   }
   return (
-    <div className="card">
+    <div className="card kb-card">
       <span className="corner tl" />
       <span className="corner br" />
-      <div className="row" style={{ marginBottom: 8 }}>
-        <IcBox style={{ width: 17, height: 17, color: 'var(--acid)' }} />
-        <b>{p.name}</b>
-        <span className="right row" style={{ gap: 4 }}>
+      <div className="kb-head">
+        <span className="kb-ic"><IcBox /></span>
+        <b className="kb-title clamp2" style={{ fontSize: 16 }}>{p.name}</b>
+        <span className="btn-group">
           {items.length > 0 && (
-            <button className="btn sm" onClick={runSync} disabled={sync?.state === 'loading'} title="Sprawdź strony produktu i zsynchronizuj opis ze źródłami">
+            <button className="btn sm icon" onClick={runSync} disabled={sync?.state === 'loading'} title="Sprawdź strony produktu i zsynchronizuj opis ze źródłami">
               <IcRefresh />
             </button>
           )}
-          <button className="btn sm" onClick={onEdit} title="Edytuj produkt">
+          <button className="btn sm icon" onClick={onEdit} title="Edytuj produkt">
             <IcEdit />
           </button>
-          <button className="btn sm danger" onClick={del} title="Usuń">
+          <button className="btn sm icon danger" onClick={del} title="Usuń">
             <IcTrash />
           </button>
         </span>
       </div>
-      <p className="muted" style={{ fontSize: 13, marginBottom: 6 }}>{p.description || 'Brak opisu.'}</p>
-      {items.length > 0 && (
-        <div className="mono" style={{ fontSize: 11, marginBottom: 10 }}>
-          Opis ze źródeł • {p.desc_synced_at ? `zsynchronizowano ${fmtWhen(p.desc_synced_at)}` : 'jeszcze niesynchronizowany — naciśnij ↻'} • auto codziennie rano
-        </div>
-      )}
+      <div className="kb-prod-badges">
+        {p.price !== null && p.price !== undefined ? (
+          <span className="badge acid">{fmtPrice(p)}</span>
+        ) : (
+          <span className="badge warn">Brak ceny</span>
+        )}
+        {p.offer_mode === 'main' && <span className="badge acid">Główna oferta</span>}
+        {p.offer_mode === 'on_request' && <span className="badge">Tylko na pytanie</span>}
+        {p.buy_url ? <span className="badge acid">Link do zakupu</span> : <span className="badge danger">Brak linku do zakupu</span>}
+        {p.sales_name || p.sales_phone ? (
+          <span className="badge" title={[p.sales_name, p.sales_phone].filter(Boolean).join(' • ')}>Opiekun: {p.sales_name || p.sales_phone}</span>
+        ) : (
+          <span className="badge warn">Brak opiekuna</span>
+        )}
+      </div>
+      <p className="kb-prod-desc clamp3" title={p.description || ''}>{p.description || 'Brak opisu.'}</p>
       {lastDesc && (
-        <button type="button" className="kb-flag" style={{ marginTop: 0, marginBottom: 10 }} onClick={() => setSync({ state: 'history', res: { description: { ok: true, changed: true, ...lastDesc } } })}>
+        <button type="button" className="kb-flag" onClick={() => setSync({ state: 'history', res: { description: { ok: true, changed: true, ...lastDesc } } })}>
           Opis zmienił się {fmtWhen(lastDesc.at)}{lastDesc.auto ? ' (automatycznie)' : ''} — zobacz, co
         </button>
       )}
       {p.manual_notes && (
-        <p style={{ fontSize: 12.5, marginBottom: 10 }}>
-          <span className="mono" style={{ fontSize: 11, display: 'block', marginBottom: 3 }}>Opis ręczny</span>
+        <p className="kb-text clamp2" title={p.manual_notes}>
+          <b style={{ color: 'var(--text)', fontWeight: 600 }}>Opis ręczny: </b>
           {p.manual_notes}
         </p>
       )}
@@ -458,31 +477,21 @@ function ProductCard({ p, items, onChanged, onEdit, onAddItem }) {
           }}
         />
       )}
-      <div className="row" style={{ gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
-        {p.price !== null && p.price !== undefined ? (
-          <span className="badge acid">{fmtPrice(p)}</span>
-        ) : (
-          <span className="badge warn">Brak ceny</span>
-        )}
-        {p.offer_mode === 'main' && <span className="badge acid">Główna oferta</span>}
-        {p.offer_mode === 'on_request' && <span className="badge">Tylko na pytanie klienta</span>}
-        {p.buy_url ? <span className="badge acid">Link do zakupu</span> : <span className="badge danger">Brak linku do zakupu</span>}
-        {p.sales_name || p.sales_phone ? (
-          <span className="badge">Sprzedaż: {[p.sales_name, p.sales_phone].filter(Boolean).join(' • ')}</span>
-        ) : (
-          <span className="badge warn">Brak opiekuna sprzedaży</span>
-        )}
-      </div>
-      <div className="row" style={{ marginBottom: 8 }}>
-        <span className="mono">Wiedza o produkcie ({items.length})</span>
+      <div className="sec-h" style={{ margin: '8px 0 0' }}>
+        Wiedza o produkcie · {items.length}
         <button className="btn sm right" onClick={onAddItem}>
           <IcPlus /> Dodaj
         </button>
       </div>
-      <div style={{ display: 'grid', gap: 8 }}>
-        {items.map((it) => (
-          <KbCard key={it.id} it={it} onChanged={onChanged} compact />
-        ))}
+      {items.length > 0 && (
+        <div className="kb-sub">
+          {items.map((it) => (
+            <KbCard key={it.id} it={it} onChanged={onChanged} compact />
+          ))}
+        </div>
+      )}
+      <div className="kb-meta">
+        <span>{items.length > 0 ? (p.desc_synced_at ? `Opis ze źródeł · zsynchronizowano ${fmtWhen(p.desc_synced_at)}` : 'Opis jeszcze niesynchronizowany — naciśnij ↻') : 'Opis wpisany ręcznie'}</span>
       </div>
     </div>
   )

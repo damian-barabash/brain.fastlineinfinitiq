@@ -181,7 +181,7 @@ function Integrations({ projId, channels, refreshChannels }) {
   return (
     <>
       <div className="grid g2">
-        <div className="card">
+        <div className="card" data-tour="int-widget">
           <span className="corner tl" />
           <span className="corner br" />
           <div className="row" style={{ marginBottom: 14 }}>

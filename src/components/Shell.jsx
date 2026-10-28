@@ -30,6 +30,10 @@ const Knowledge = lazy(() => import('../pages/Knowledge.jsx'))
 const Settings = lazy(() => import('../pages/Settings.jsx'))
 const Integrations = lazy(() => import('../pages/Integrations.jsx'))
 const AdminPanel = lazy(() => import('../pages/AdminPanel.jsx'))
+const Payments = lazy(() => import('../shared/Payments.jsx'))
+import { ChannelGate, StartGuide, needsOnboarding } from '../shared/Onboarding.jsx'
+import MetaConnect from './MetaConnect.jsx'
+import { IcCard } from '../shared/Icons.jsx'
 
 export default function Shell() {
   const nav = useNavigate()
@@ -138,6 +142,36 @@ export default function Shell() {
     { to: '/app/knowledge', label: 'Baza wiedzy', icon: <IcBook /> },
   ].filter(Boolean)
 
+  // Zakup online → prowadzenie za rękę (Miro 4A). Najpierw obowiązkowy kanał —
+  // bez niego panel się nie otwiera; potem kreator startu na żywych ekranach.
+  const onb = needsOnboarding(me) && isAdvisor
+  const [gateOk, setGateOk] = useState(() => !!session.user?.onboarding?.channel_done)
+  if (onb && !gateOk && !me?.onboarding?.channel_done) {
+    return (
+      <ChannelGate
+        projectId={proj.id}
+        extra={(recheck) => (
+          <details className="onb-more">
+            <summary>Messenger strony firmowej albo Instagram Business — przez Facebooka</summary>
+            <MetaConnect projectId={proj.id} onChange={recheck} />
+          </details>
+        )}
+        onDone={() => setGateOk(true)}
+      />
+    )
+  }
+  const guideSteps = [
+    { key: 'kb', title: 'Wiedza o firmie', path: '/app/knowledge', target: '[data-tour="kb-add"]',
+      text: 'Kliknij „Dodaj wiedzę" i wklej adres swojej strony WWW — doradca sam przeczyta ofertę, ceny i FAQ. Możesz też dodać plik albo tekst.',
+      done: async () => ((await api('kb.list', { project_id: proj.id }))?.items ?? []).length > 0 },
+    { key: 'archetype', title: 'Osobowość doradcy', path: '/app/advisor?tab=archetype', target: '[data-tour="adv-archetype"]',
+      text: 'Nadaj doradcy imię, wybierz ton i napisz powitanie. To pierwsze zdanie, które zobaczy Twój klient. Zapisz zmiany przyciskiem pod formularzem.' },
+    { key: 'test', title: 'Rozmowa próbna', path: '/app/advisor?tab=test', target: '[data-tour="adv-test"]',
+      text: 'Napisz kilka pytań jak klient: o cenę, termin, wybór wariantu. Jeśli odpowiedź jest zła — popraw ją kciukiem, doradca zapamięta uwagę.' },
+    { key: 'start', title: 'Start na stronie', path: '/app/integrations', target: '[data-tour="int-widget"]',
+      text: 'Doradca już odpowiada w podłączonym kanale. Skopiuj kod widgetu i wklej go na swojej stronie (albo wyślij informatykowi) — wtedy rozmawia też na WWW.' },
+  ]
+
   return (
     <div className="shell">
       <aside className={`sb ${open ? '' : 'closed'}`}>
@@ -176,6 +210,10 @@ export default function Shell() {
             <IcGlobe />
             {open && <span className="lbl">Integracje</span>}
           </NavLink>
+          <NavLink to="/app/platnosci" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Płatności">
+            <IcCard />
+            {open && <span className="lbl">Płatności</span>}
+          </NavLink>
           <NavLink to="/app/settings" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Ustawienia">
             <IcGear />
             {open && <span className="lbl">Ustawienia</span>}
@@ -207,6 +245,16 @@ export default function Shell() {
         <div className="topbar">
           <UserBadge user={me} />
         </div>
+        {me?.billing_blocked && (
+          <div className="pay-debt" style={{ marginBottom: 18 }}>
+            <div>
+              <b>AI Doradca wstrzymany — zaległa płatność</b>
+              <span>Dane i ustawienia są bezpieczne. Po opłaceniu faktury doradca wraca od razu.</span>
+            </div>
+            <NavLink className="btn primary" to="/app/platnosci">Przejdź do płatności</NavLink>
+          </div>
+        )}
+        {onb && <StartGuide steps={guideSteps} user={me} />}
         <Suspense fallback={<SkelPage stats={4} cards={2} />}>
           <Routes>
             <Route path="dashboard" element={<Dashboard />} />
@@ -215,6 +263,7 @@ export default function Shell() {
             <Route path="knowledge" element={<Knowledge />} />
             <Route path="integrations" element={<Integrations />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="platnosci" element={<Payments />} />
             {user?.role === 'admin' && <Route path="admin" element={<AdminPanel />} />}
             <Route path="*" element={<Navigate to="dashboard" replace />} />
           </Routes>

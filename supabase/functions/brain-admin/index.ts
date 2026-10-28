@@ -33,13 +33,16 @@ type User = {
   display_name: string | null;
   role: "admin" | "client";
   workspace_id: string | null;
+  // konto z zakupu online (edge `billing`): hasło jednorazowe → zmiana przy 1. logowaniu
+  must_change_password?: boolean;
+  onboarding?: Record<string, unknown>;
 };
 
 async function getUser(token: string | undefined): Promise<User | null> {
   if (!token) return null;
   const { data } = await db
     .from("brain_sessions")
-    .select("expires_at, brain_users(id, login, display_name, role, workspace_id, disabled, avatar)")
+    .select("expires_at, brain_users(id, login, display_name, role, workspace_id, disabled, avatar, must_change_password, onboarding)")
     .eq("token", token)
     .maybeSingle();
   if (!data || !data.brain_users) return null;
@@ -1015,11 +1018,13 @@ Deno.serve(async (req) => {
 
     // ── login (bez sesji) ────────────────────────────────────────────────
     if (action === "login") {
-      const login = String(body.login || "").trim();
+      const raw = String(body.login || "").trim();
+      // konta z zakupu online mają login = e-mail małymi literami
+      const login = raw.includes("@") ? raw.toLowerCase() : raw;
       const password = String(body.password || "");
       const { data: u } = await db
         .from("brain_users")
-        .select("id, login, display_name, role, workspace_id, pass_hash, disabled, avatar")
+        .select("id, login, display_name, role, workspace_id, pass_hash, disabled, avatar, must_change_password, onboarding")
         .eq("login", login)
         .maybeSingle();
       if (!u || u.disabled || !bcrypt.compareSync(password, u.pass_hash)) {
@@ -1031,7 +1036,10 @@ Deno.serve(async (req) => {
       await db.from("brain_users").update({ last_login_at: new Date().toISOString() }).eq("id", u.id);
       return J({
         token,
-        user: { id: u.id, login: u.login, display_name: u.display_name, role: u.role, workspace_id: u.workspace_id, avatar: u.avatar },
+        user: {
+          id: u.id, login: u.login, display_name: u.display_name, role: u.role, workspace_id: u.workspace_id, avatar: u.avatar,
+          must_change_password: !!u.must_change_password, onboarding: u.onboarding ?? {},
+        },
       });
     }
 
@@ -1092,7 +1100,9 @@ Deno.serve(async (req) => {
       case "connect.create": {
         const pid = String(body.project_id || "");
         await assertProject(user, pid);
-        if (!admin) return J({ error: "forbidden" }, 403);
+        // klient z zakupu online podłącza kanał sam (kreator startu) — reszta klientów
+        // dostaje link od nas, jak dotąd
+        if (!admin && !user.onboarding?.started_at) return J({ error: "forbidden" }, 403);
         const kind = String(body.kind ?? "create") === "reconnect" ? "reconnect" : "create";
         const originRaw = String(body.origin ?? "").replace(/\/+$/, "");
         const origin = ORIGINS.has(originRaw) ? originRaw : "https://brain.fastlineinfinitiq.pl";
@@ -1282,8 +1292,32 @@ Deno.serve(async (req) => {
         return J({ ensured, webhooks: items });
       }
 
-      case "me":
-        return J({ user });
+      case "me": {
+        // blokada za zaległą płatność (edge `billing`, dzień 7) — panel pokazuje baner
+        let billing_blocked = false;
+        if (user.workspace_id) {
+          const { data: ws } = await db.from("brain_workspaces").select("billing_blocked_at").eq("id", user.workspace_id).maybeSingle();
+          billing_blocked = !!ws?.billing_blocked_at;
+        }
+        return J({ user: { ...user, billing_blocked } });
+      }
+
+      // ── pierwsze logowanie po zakupie: własne hasło bez starego ─────────
+      case "users.setInitialPassword": {
+        if (!user.must_change_password) return J({ error: "forbidden" }, 403);
+        const nw = String(body.new_password || "");
+        if (nw.length < 8) return J({ error: "short password" }, 400);
+        await db.from("brain_users").update({ pass_hash: bcrypt.hashSync(nw, 10), must_change_password: false }).eq("id", user.id);
+        return J({ ok: true });
+      }
+
+      // ── kreator startu (prowadzenie za rękę) — stan per użytkownik ──────
+      case "onboarding.set": {
+        const patch = (body.patch ?? {}) as Record<string, unknown>;
+        const next = { ...(user.onboarding ?? {}), ...patch, updated_at: new Date().toISOString() };
+        await db.from("brain_users").update({ onboarding: next }).eq("id", user.id);
+        return J({ ok: true, onboarding: next });
+      }
       case "logout": {
         await db.from("brain_sessions").delete().eq("token", body.token as string);
         return J({ ok: true });

@@ -6,7 +6,8 @@ import { api, session } from './platform.js'
 
 export default function Login({ product = 'Brain', tagline = 'Cyfrowi pracownicy. Zaloguj się, aby kontynuować.' }) {
   const nav = useNavigate()
-  const [login, setLogin] = useState('')
+  // link z maila powitalnego: /login?login=<e-mail>
+  const [login, setLogin] = useState(() => new URLSearchParams(window.location.search).get('login') || '')
   const [pass, setPass] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)

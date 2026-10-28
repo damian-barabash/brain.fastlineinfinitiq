@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { session } from './lib/api.js'
 import Login from './pages/Login.jsx'
 import Picker from './pages/Picker.jsx'
@@ -10,10 +10,14 @@ const Demo = lazy(() => import('./pages/Demo.jsx'))
 const SalesDemo = lazy(() => import('./pages/SalesDemo.jsx'))
 const Connect = lazy(() => import('./shared/Connect.jsx'))
 const MetaCallback = lazy(() => import('./pages/MetaCallback.jsx'))
+const ChangePassword = lazy(() => import('./shared/ChangePassword.jsx'))
 
 function Guard({ children, needProject }) {
   const loc = useLocation()
+  const [, bump] = useState(0)
   if (!session.token) return <Navigate to="/login" replace state={{ from: loc.pathname }} />
+  // konto z zakupu online: hasło z maila jest jednorazowe — najpierw własne hasło
+  if (session.user?.must_change_password) return <ChangePassword onDone={() => bump((n) => n + 1)} />
   if (needProject && (!session.ws || !session.proj)) return <Navigate to="/" replace />
   return children
 }
@@ -53,6 +57,8 @@ export default function App() {
             </Guard>
           }
         />
+        {/* linki z maili i z bramki płatności: /platnosci?paid=1 → zakładka w panelu */}
+        <Route path="/platnosci" element={<Navigate to={`/app/platnosci${typeof location !== 'undefined' ? location.search : ''}`} replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Suspense>

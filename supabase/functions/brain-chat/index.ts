@@ -270,10 +270,14 @@ async function loadContext(publicKey: string) {
 async function loadContextFresh(publicKey: string) {
   const { data: ch } = await db
     .from("brain_channels")
-    .select("id, project_id, type, enabled, config, brain_projects(id, name)")
+    .select("id, project_id, type, enabled, config, brain_projects(id, name, brain_workspaces(billing_blocked_at))")
     .eq("public_key", publicKey)
     .maybeSingle();
   if (!ch || !ch.enabled) return null;
+  // zaległa płatność za abonament (edge `billing`, dzień 7) — doradca milczy, dopóki
+  // faktura nie zostanie opłacona (wtedy `billing_blocked_at` wraca do null)
+  const wsRow = (ch.brain_projects as unknown as { brain_workspaces?: { billing_blocked_at?: string | null } } | null)?.brain_workspaces;
+  if (wsRow?.billing_blocked_at) return null;
   const project = ch.brain_projects as unknown as { id: string; name: string };
   const [{ data: adv }, { data: products }, { data: items }, { data: settings }, { data: fb }] = await Promise.all([
     db.from("brain_advisor").select("config").eq("project_id", ch.project_id).maybeSingle(),

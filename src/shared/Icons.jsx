@@ -349,3 +349,10 @@ export const IcFilter = (p) => (
     <path d="M3 5h18l-7 8v6l-4-2v-4z" />
   </I>
 )
+// płatności (2026-10-28)
+export const IcCard = (p) => (
+  <I {...p}>
+    <path d="M3 6h18v12H3z" />
+    <path d="M3 10h18M7 15h4" />
+  </I>
+)

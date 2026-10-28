@@ -117,7 +117,16 @@ export default function Picker({ productKey, localKeys, onDone }) {
     // które należą do wybranego (projekt bez przypisań należy do wszystkich).
     await swr('proj.list', { workspace_id: w.id, product_key: session.product?.key }, (d) => {
       if (wsRef.current !== w.id) return // w międzyczasie wybrano inny workspace
-      setProjects(d.projects ?? [])
+      const list = d.projects ?? []
+      setProjects(list)
+      // klient z jednym projektem (np. konto z zakupu online) nie musi nic wybierać
+      if (user?.role !== 'admin' && list.length === 1 && wanted !== 'proj' && !wsRef.autoProj) {
+        wsRef.autoProj = true
+        // `ws` ze stanu jeszcze się nie zaktualizował — workspace podajemy wprost
+        session.setWs(w)
+        session.setProj(list[0])
+        onDone()
+      }
     })
   }
 

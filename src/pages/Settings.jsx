@@ -38,39 +38,63 @@ export default function Settings() {
           <h1>Ustawienia</h1>
         </div>
       </div>
-      <div className="grid g2">
-        <div className="card">
-          <h3 style={{ fontSize: 14, marginBottom: 14 }}>Motyw panelu</h3>
-          <div className="chips">
-            <button className={theme === 'dark' ? 'on' : ''} onClick={() => pick('dark')}>
-              <IcMoon style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }} />
-              Ciemny
-            </button>
-            <button className={theme === 'light' ? 'on' : ''} onClick={() => pick('light')}>
-              <IcSun style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }} />
-              Jasny
-            </button>
+      <div style={{ maxWidth: 860 }}>
+        <div className="sec-h">Wygląd</div>
+        <div className="srows">
+          <div className="srow">
+            <div className="sl">
+              <b>Motyw panelu</b>
+              <small>Zapamiętujemy go w tej przeglądarce.</small>
+            </div>
+            <div className="sv">
+              <div className="chips">
+                <button className={theme === 'dark' ? 'on' : ''} onClick={() => pick('dark')}>
+                  <IcMoon style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }} />
+                  Ciemny
+                </button>
+                <button className={theme === 'light' ? 'on' : ''} onClick={() => pick('light')}>
+                  <IcSun style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }} />
+                  Jasny
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-        <div className="card">
-          <h3 style={{ fontSize: 14, marginBottom: 14 }}>Zmiana hasła</h3>
-          <label className="f">
-            <span className="mono">Obecne hasło</span>
-            <input type="password" value={oldP} onChange={(e) => setOldP(e.target.value)} autoComplete="current-password" />
-          </label>
-          <label className="f">
-            <span className="mono">Nowe hasło (min. 6 znaków)</span>
-            <input type="password" value={newP} onChange={(e) => setNewP(e.target.value)} autoComplete="new-password" />
-          </label>
-          <div className="row">
-            <button className="btn primary" onClick={changePass} disabled={!oldP || !newP}>
-              Zmień hasło
-            </button>
-            {msg && (
-              <span className={`badge ${msg.ok ? 'ok' : 'danger'}`}>
-                {msg.ok && <IcCheck style={{ width: 11, height: 11 }} />} {msg.text}
-              </span>
-            )}
+
+        <div className="sec-h">Konto</div>
+        <div className="srows">
+          <div className="srow">
+            <div className="sl"><b>Login</b></div>
+            <div className="sv"><span className="ell">{user?.login}</span></div>
+          </div>
+          <div className="srow">
+            <div className="sl"><b>Obecne hasło</b></div>
+            <div className="sv">
+              <input type="password" value={oldP} onChange={(e) => setOldP(e.target.value)} autoComplete="current-password" aria-label="Obecne hasło" />
+            </div>
+          </div>
+          <div className="srow">
+            <div className="sl">
+              <b>Nowe hasło</b>
+              <small>Minimum 6 znaków.</small>
+            </div>
+            <div className="sv">
+              <input type="password" value={newP} onChange={(e) => setNewP(e.target.value)} autoComplete="new-password" aria-label="Nowe hasło" />
+            </div>
+          </div>
+          <div className="srow">
+            <div className="sl">
+              {msg && (
+                <span className={`badge ${msg.ok ? 'ok' : 'danger'}`}>
+                  {msg.ok && <IcCheck style={{ width: 11, height: 11 }} />} {msg.text}
+                </span>
+              )}
+            </div>
+            <div className="sv">
+              <button className="btn primary" onClick={changePass} disabled={!oldP || !newP}>
+                Zmień hasło
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -1,5 +1,6 @@
 // AI Doradca: Archetyp / Test rozmowy / Integracje (widget embed + Meta API).
 import { useEffect, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { api, session, chatStream, FN_BASE, PANEL_ORIGIN } from '../lib/api.js'
 import { useCached } from '../lib/useCached.js'
 import ChatFeedback from '../components/ChatFeedback.jsx'
@@ -22,7 +23,13 @@ const TONES = ['Profesjonalny', 'Przyjazny', 'Ekspercki', 'Energiczny', 'Spokojn
 
 export default function Advisor() {
   const proj = session.proj
-  const [tab, setTab] = useState('archetype')
+  const loc = useLocation()
+  const [tab, setTab] = useState(() => (new URLSearchParams(loc.search).get('tab') === 'test' ? 'test' : 'archetype'))
+  // kreator startu przełącza zakładkę adresem (?tab=test)
+  useEffect(() => {
+    const t = new URLSearchParams(loc.search).get('tab')
+    if (t === 'test' || t === 'archetype') setTab(t)
+  }, [loc.search])
   const [chData, refreshChannels] = useCached('channels.list', { project_id: proj.id })
   const channels = chData?.channels ?? null
 
@@ -44,7 +51,7 @@ export default function Advisor() {
         title="Poprawki z czatów — doradca"
         hint="Uwagi, które dawałeś doradcy w rozmowach testowych. Włączone dopisują się do jego instrukcji i działają na wszystkich kanałach."
       />
-      <div className="tabs">
+      <div className="tabs" data-tour="adv-tabs">
         <button className={tab === 'archetype' ? 'on' : ''} onClick={() => setTab('archetype')}>
           Archetyp
         </button>
@@ -90,7 +97,7 @@ function Archetype({ projId }) {
 
   if (!cfg) return <SkelPage head={false} cards={2} />
   return (
-    <div className="grid g2">
+    <div className="grid g2" data-tour="adv-archetype">
       <div className="card">
         <span className="corner tl" />
         <span className="corner br" />
@@ -272,7 +279,7 @@ function TestChat({ projId, channels, refreshChannels }) {
   }
 
   return (
-    <div className="card" style={{ height: '62vh', display: 'flex', flexDirection: 'column', padding: 0 }}>
+    <div className="card" data-tour="adv-test" style={{ height: '62vh', display: 'flex', flexDirection: 'column', padding: 0 }}>
       <div className="row" style={{ padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
         <span className="dot" />
         <span className="mono" style={{ color: 'var(--text)' }}>Podgląd na żywo — rozmowa testowa</span>
