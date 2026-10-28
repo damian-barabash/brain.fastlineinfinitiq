@@ -4,6 +4,7 @@
 // po 7 dniach doradca jest wstrzymany, po 14 subskrypcja anulowana (mail dzień 0/3/5).
 import { useCallback, useEffect, useState } from 'react'
 import { postEdge, session } from './platform.js'
+import Invoices from './Invoices.jsx'
 
 async function billing(action, payload = {}) {
   const r = await postEdge('billing', { action, token: session.token, ...payload }, { read: action === 'account.get' })
@@ -163,42 +164,8 @@ export default function Payments() {
           </>
         )}
 
-        <div className="sec-h">Faktury</div>
-        {d.invoices.length ? (
-          <div className="tbl-wrap">
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th>Numer</th>
-                  <th>Data</th>
-                  <th style={{ textAlign: 'right' }}>Kwota brutto</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.invoices.map((i) => (
-                  <tr key={i.id}>
-                    <td className="ell"><b>{i.number}</b></td>
-                    <td>{day(i.issue_date)}</td>
-                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{zl(i.gross)}</td>
-                    <td>
-                      <span className={`badge ${i.status === 'paid' ? 'ok' : 'warn'}`}>{i.status === 'paid' ? 'Opłacona' : 'Do zapłaty'}</span>
-                    </td>
-                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                      {i.pay_url && (
-                        <a className="btn primary" href={i.pay_url} style={{ marginRight: 6 }}>Zapłać</a>
-                      )}
-                      <a className="btn" href={i.url} target="_blank" rel="noopener">Pobierz</a>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="empty">Brak faktur.</div>
-        )}
+        {/* klient: faktury swojej firmy; administrator: wszystkie faktury platformy */}
+        <Invoices invoices={session.user?.role === 'admin' ? undefined : d.invoices} />
 
         {c && (
           <>

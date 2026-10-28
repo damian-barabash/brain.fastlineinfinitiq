@@ -407,7 +407,9 @@ function Conversations({ S, refetch }) {
     s === 'closed' ? <span className="badge ok">Zakończona</span> : s === 'redirected' ? <span className="badge warn">Przekazana</span> : <span className="badge acid">Otwarta</span>
 
   return (
-    <div className="grid" style={{ gridTemplateColumns: sel ? 'minmax(300px,1fr) minmax(320px,1.2fr)' : '1fr' }}>
+    // otwarta rozmowa zabiera prawą kolumnę — lista przechodzi w zwarty układ
+    // (gość + status w jednej linii, data i kanał pod spodem), żeby nic się nie łamało
+    <div className={`conv-split${sel ? ' open' : ''}`}>
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
         {checked.size > 0 && (
           <div className="row" style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)', gap: 10 }}>
@@ -426,9 +428,7 @@ function Conversations({ S, refetch }) {
               <th style={{ width: 34 }}>
                 <input type="checkbox" checked={allChecked} onChange={toggleAll} aria-label="Zaznacz wszystkie" disabled={!S.convs.length} />
               </th>
-              <th>Start</th>
-              <th>Kanał</th>
-              <th>Gość</th>
+              {sel ? <th>Rozmowa</th> : <><th>Start</th><th>Kanał</th><th>Gość</th></>}
               <th>Status</th>
               <th style={{ width: 44 }} />
             </tr>
@@ -439,9 +439,20 @@ function Conversations({ S, refetch }) {
                 <td onClick={(e) => e.stopPropagation()}>
                   <input type="checkbox" checked={checked.has(c.id)} onChange={() => toggle(c.id)} aria-label="Zaznacz rozmowę" />
                 </td>
-                <td>{new Date(c.started_at).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })}</td>
-                <td className="mono" style={{ fontSize: 10.5 }}>{chLabel(c.channel_type)}</td>
-                <td className="mono" style={{ fontSize: 10.5 }}>{c.visitor_id?.slice(0, 14) || '—'}</td>
+                {sel ? (
+                  <td>
+                    <div className="conv-cell">
+                      <b className="ell">{c.visitor_id?.slice(0, 18) || '—'}</b>
+                      <small>{new Date(c.started_at).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })} · {chLabel(c.channel_type)}</small>
+                    </div>
+                  </td>
+                ) : (
+                  <>
+                    <td style={{ whiteSpace: 'nowrap' }}>{new Date(c.started_at).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                    <td className="mono" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>{chLabel(c.channel_type)}</td>
+                    <td className="mono ell" style={{ fontSize: 10.5 }}>{c.visitor_id?.slice(0, 14) || '—'}</td>
+                  </>
+                )}
                 <td>{badge(c.status)}</td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <button className="btn sm icon" title="Usuń rozmowę" aria-label="Usuń rozmowę" onClick={() => removeConvs([c.id])} disabled={busy}>
@@ -452,7 +463,7 @@ function Conversations({ S, refetch }) {
             ))}
             {!S.convs.length && (
               <tr>
-                <td colSpan={6} className="muted" style={{ padding: 24 }}>
+                <td colSpan={sel ? 4 : 6} className="muted" style={{ padding: 24 }}>
                   Brak konwersacji w wybranym okresie.
                 </td>
               </tr>

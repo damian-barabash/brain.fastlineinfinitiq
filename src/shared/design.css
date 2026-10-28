@@ -1946,3 +1946,20 @@ select {
 /* otwarty kreator startu nie zasłania treści (szeroki ekran: miejsce po prawej) */
 @media (min-width: 1100px) { .shell:has(.onb-dock:not(.min)) .main { padding-right: 340px; } }
 @media (max-width: 1099px) { .shell:has(.onb-dock) .main { padding-bottom: 120px; } }
+/* faktury — narzędzia listy administratora */
+.inv-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 12px; }
+.inv-search { flex: 1 1 240px; max-width: 360px; }
+.inv-sum { font-size: 13.5px; color: var(--dim); }
+.inv-sum b { color: var(--text, inherit); }
+
+/* plakietki nigdy nie łamią się po literach (rozmowy, leady, faktury — 2026-10-28) */
+.badge { white-space: nowrap; flex-shrink: 0; }
+
+/* Dashboard → Konwersacje: lista + otwarta rozmowa */
+.conv-split { display: grid; gap: 16px; grid-template-columns: 1fr; align-items: start; }
+.conv-split.open { grid-template-columns: minmax(340px, 0.85fr) minmax(380px, 1.3fr); }
+.conv-split .tbl td { vertical-align: middle; }
+.conv-cell { display: grid; gap: 3px; min-width: 0; max-width: 260px; }
+.conv-cell b { font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 600; }
+.conv-cell small { color: var(--dim); font-size: 12.5px; white-space: nowrap; }
+@media (max-width: 1180px) { .conv-split.open { grid-template-columns: 1fr; } }

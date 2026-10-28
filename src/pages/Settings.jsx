@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { api, session, getTheme, setTheme } from '../lib/api.js'
 import { IcSun, IcMoon, IcCheck } from '../components/Icons.jsx'
+import Invoices from '../shared/Invoices.jsx'
 
 export default function Settings() {
   const [theme, setThemeState] = useState(getTheme())
@@ -97,6 +98,8 @@ export default function Settings() {
             </div>
           </div>
         </div>
+        {/* faktury: klient — swoje, administrator — wszystkie faktury platformy */}
+        <Invoices />
       </div>
     </>
   )
